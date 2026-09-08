@@ -254,6 +254,11 @@ INSTRUMENTS: dict[str, dict] = {
     # of magnitude as March/May/July), just never the single highest-
     # volume day -- unlike wheat, where September DOES win. ZC's own
     # active_months excludes it accordingly; ZW's below does not.
+    # The multiplier below is USD P&L for a 1.00 move in the quoted price,
+    # not the physical contract quantity. ZC/ZS/ZW are quoted in cents/bu:
+    # 5,000 bu * $0.01 = $50 (full size), while the 500-bu Micro contracts
+    # are $5. ZL is quoted in cents/lb: 60,000 lb * $0.01 = $600, while
+    # Micro Soybean Oil's 6,000 lb contract is $60.
     'ZL':  {'exchange': 'CBOT',  'multiplier': 600,        'cluster': 'grain', # notional ~= 43K
             'initial_margin': 5102.79, 'commission': 3.01, 'active_months': ['F', 'H', 'K', 'N', 'Z'],
             'annualization_days': 252},
