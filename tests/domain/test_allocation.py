@@ -28,6 +28,7 @@ from derivatives_bt_engine.domain.allocation import (
     UNCOVERED_BUDGET_CAP_FRACTION,
     _bounded_ewm_correlation_matrix,
     _coverage_restricted_idm,
+    allocate_lot_aware_targets,
     _spinu_erc_newton,
     apply_cluster_risk_cap,
     build_returns_wide,
@@ -714,6 +715,45 @@ def _target(symbol, cluster, continuous_contracts, close=100.0, multiplier=10.0,
     }
 
 
+def test_lot_aware_allocator_prefers_feasible_cluster_representative():
+    # A's one-lot risk fits the account target while B's does not.  Both
+    # belong to the same cluster, so the allocator should represent the
+    # cluster with A rather than independently rounding either signal.
+    targets = [
+        _target('A', 'equity', 0.33, close=100, multiplier=200, hv=0.20),  # one-lot risk = 4,000
+        _target('B', 'equity', -0.16, close=100, multiplier=500, hv=0.20),  # one-lot risk = 10,000
+    ]
+    out = allocate_lot_aware_targets(
+        targets,
+        portfolio_risk_target=5_000,
+        H=np.eye(2),
+        active_symbols=['A', 'B'],
+    )
+
+    assert out[0]['target_con'] == 1
+    assert out[1]['target_con'] == 0
+    assert out[1]['integer_zero_reason'] == 'integer_risk_limit'
+    assert out[0]['pos_risk'] == pytest.approx(4_000)
+
+
+def test_lot_aware_allocator_preserves_direction_and_hard_limit():
+    targets = [
+        _target('LONG', 'equity', 1.2, close=100, multiplier=100, hv=0.10),
+        _target('SHORT', 'rates', -1.2, close=100, multiplier=100, hv=0.10),
+    ]
+    out = allocate_lot_aware_targets(
+        targets,
+        portfolio_risk_target=15,
+        H=np.eye(2),
+        active_symbols=['LONG', 'SHORT'],
+    )
+
+    assert out[0]['target_con'] >= 0
+    assert out[1]['target_con'] <= 0
+    realized = math.sqrt(sum(t['pos_risk'] ** 2 for t in out))
+    assert realized <= 15 + 1e-9
+
+
 @pytest.mark.parametrize('n_active_clusters,expected_pct', [
     (1, 1.0), (2, 0.5), (3, 1 / 3), (4, 0.25), (5, 0.25), (6, 0.25),
 ])
@@ -1167,4 +1207,3 @@ def test_signal_confidence_instrument_specific_spike_discounts_only_that_instrum
 
     assert spiking_scalar < calm_scalar
     assert math.isclose(calm_scalar, 0.6 * max(0.25, min(2.0, 0.15 / (0.01 * math.sqrt(252)))), rel_tol=1e-9)
-

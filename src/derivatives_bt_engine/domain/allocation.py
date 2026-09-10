@@ -307,6 +307,234 @@ def apply_cluster_risk_cap(targets: list[dict], max_cluster_risk_pct: float,
     return targets
 
 
+def allocate_lot_aware_targets(
+    targets: list[dict],
+    portfolio_risk_target: Optional[float],
+    *,
+    risk_overrun_pct: float = 0.0,
+    H: Optional[np.ndarray] = None,
+    active_symbols: Optional[list[str]] = None,
+    max_cluster_risk_pct: float = 0.25,
+    total_risk_target: Optional[float] = None,
+    n_active_clusters: int = 0,
+    apply_cluster_cap: bool = False,
+) -> list[dict]:
+    """Allocate whole contracts against the portfolio risk budget.
+
+    This is the opt-in, deterministic discrete allocator used by live
+    rebalancing.  It starts from zero and greedily adds one contract at a
+    time, subject to the correlation-aware portfolio-risk limit and the
+    optional standalone cluster cap.  The order of decisions is deliberate:
+
+    * give each signaled cluster its least-risk representative when feasible;
+    * add contracts that reduce the continuous dollar-risk/exposure gap;
+    * use spare risk capacity to move the realized portfolio risk toward the
+      requested portfolio target, allowing at most one contract beyond each
+      continuous target.
+
+    The existing ``apply_cluster_risk_cap`` remains the default path.  This
+    function is intentionally a separate policy so that changing integer
+    sizing is explicit and independently auditable.  Correlation is used for
+    every feasibility check when ``H`` is supplied; an identity matrix is
+    used when no correlation estimate is available.
+
+    Targets with errors or incomplete sizing inputs are left untouched.  The
+    remaining valid targets are mutated with ``target_con``, ``pos_risk``,
+    and, where a live signal cannot fit even as one lot, an
+    ``integer_zero_reason`` diagnostic.
+    """
+    if risk_overrun_pct < 0:
+        raise ValueError('risk_overrun_pct must be non-negative')
+
+    valid = [
+        t for t in targets
+        if not t.get('error')
+        and t.get('symbol') is not None
+        and t.get('contin_con') is not None
+        and t.get('cluster') is not None
+        and t.get('close') is not None
+        and t.get('mult') is not None
+        and t.get('hv') is not None
+    ]
+    eligible = [
+        t for t in valid
+        if t.get('active', True) is not False and abs(float(t['contin_con'])) > 1e-12
+    ]
+    if not valid:
+        return targets
+
+    # One-contract dollar-vol risk is the common unit for both the
+    # correlation-aware portfolio check and the cluster standalone check.
+    one_contract_risk = {
+        t['symbol']: abs(float(t['close']) * float(t['mult']) * float(t['hv']))
+        for t in eligible
+    }
+    desired_risk = {
+        t['symbol']: abs(float(t['contin_con'])) * one_contract_risk[t['symbol']]
+        for t in eligible
+    }
+    max_contracts = {
+        t['symbol']: max(0, int(t['max_con'])) if t.get('max_con') is not None else 10**9
+        for t in eligible
+    }
+    continuous_contracts = {t['symbol']: abs(float(t['contin_con'])) for t in eligible}
+    direction = {
+        t['symbol']: 1 if float(t['contin_con']) > 0 else -1
+        for t in eligible
+    }
+    clusters = {t['symbol']: t['cluster'] for t in eligible}
+    symbols = [t['symbol'] for t in eligible]
+
+    # Keep the correlation matrix's symbol ordering explicit.  A malformed or
+    # unavailable estimate falls back to independent risk rather than making
+    # the rebalance fail at the final integer-allocation step.
+    risk_symbols = list(active_symbols or [])
+    corr = None
+    if H is not None and risk_symbols:
+        candidate = np.asarray(H, dtype=float)
+        if candidate.ndim == 2 and candidate.shape == (len(risk_symbols), len(risk_symbols)):
+            corr = candidate
+    if corr is None:
+        risk_symbols = symbols
+        corr = np.eye(len(risk_symbols), dtype=float)
+    risk_index = {symbol: i for i, symbol in enumerate(risk_symbols)}
+
+    portfolio_limit = None
+    if portfolio_risk_target is not None and portfolio_risk_target > 0:
+        portfolio_limit = float(portfolio_risk_target) * (1.0 + risk_overrun_pct)
+
+    cluster_limit = None
+    if apply_cluster_cap and total_risk_target is not None and total_risk_target > 0:
+        effective_cap_pct = (
+            max(max_cluster_risk_pct, 1.0 / n_active_clusters)
+            if n_active_clusters > 0 else max_cluster_risk_pct
+        )
+        cluster_limit = effective_cap_pct * float(total_risk_target)
+
+    q = {symbol: 0 for symbol in symbols}
+
+    def portfolio_risk(contract_counts: dict[str, int]) -> float:
+        exposure = np.zeros(len(risk_symbols), dtype=float)
+        for symbol, count in contract_counts.items():
+            index = risk_index.get(symbol)
+            if index is not None:
+                exposure[index] = count * one_contract_risk[symbol]
+        variance = float(exposure @ corr @ exposure)
+        return math.sqrt(max(variance, 0.0))
+
+    def cluster_risks(contract_counts: dict[str, int]) -> dict[str, float]:
+        result: dict[str, float] = {}
+        for symbol, count in contract_counts.items():
+            cluster = clusters[symbol]
+            result[cluster] = result.get(cluster, 0.0) + abs(count) * one_contract_risk[symbol]
+        return result
+
+    def feasible(contract_counts: dict[str, int]) -> bool:
+        if portfolio_limit is not None and portfolio_risk(contract_counts) > portfolio_limit + 1e-9:
+            return False
+        if cluster_limit is not None:
+            if any(risk > cluster_limit + 1e-9 for risk in cluster_risks(contract_counts).values()):
+                return False
+        return True
+
+    def distance_from_continuous(contract_counts: dict[str, int]) -> float:
+        return sum(
+            abs(abs(contract_counts[symbol]) * one_contract_risk[symbol] - desired_risk[symbol])
+            for symbol in symbols
+        )
+
+    def add_one(contract_counts: dict[str, int], symbol: str) -> dict[str, int]:
+        candidate = contract_counts.copy()
+        candidate[symbol] += direction[symbol]
+        return candidate
+
+    # First ensure that each live cluster has a representative where the
+    # account-level risk and cluster cap permit one.  The least-risk contract
+    # wins, making the choice deterministic for a given target table.
+    while True:
+        represented = {clusters[symbol] for symbol, count in q.items() if count != 0}
+        candidates: list[tuple[float, float, str, dict[str, int]]] = []
+        for symbol in symbols:
+            if (clusters[symbol] in represented or abs(q[symbol]) >= 1
+                    or max_contracts[symbol] < 1):
+                continue
+            candidate = add_one(q, symbol)
+            if feasible(candidate):
+                candidates.append((portfolio_risk(candidate), one_contract_risk[symbol], symbol, candidate))
+        if not candidates:
+            break
+        _, _, _, q = min(candidates, key=lambda item: (item[0], item[1], item[2]))
+
+    # Fit the continuous target without crossing the first integer above it.
+    # This makes .33 contracts become zero and 1.17 contracts become one, but
+    # lets a one-contract representative continue to two when the continuous
+    # target actually calls for two.
+    while True:
+        current_distance = distance_from_continuous(q)
+        candidates = []
+        for symbol in symbols:
+            desired_ceiling = min(max_contracts[symbol], math.ceil(continuous_contracts[symbol]))
+            if desired_ceiling <= 0 or abs(q[symbol]) >= desired_ceiling:
+                continue
+            candidate = add_one(q, symbol)
+            if not feasible(candidate):
+                continue
+            new_distance = distance_from_continuous(candidate)
+            if new_distance < current_distance - 1e-9:
+                candidates.append((new_distance, portfolio_risk(candidate), symbol, candidate))
+        if not candidates:
+            break
+        _, _, _, q = min(candidates, key=lambda item: (item[0], item[1], item[2]))
+
+    # Spend unused portfolio capacity only when it moves realized risk closer
+    # to the requested target.  One extra lot beyond the continuous target is
+    # the bounded utilization allowance; it prevents tiny continuous targets
+    # from consuming the entire discrete budget while still avoiding runaway
+    # integer over-allocation.
+    if portfolio_risk_target is not None and portfolio_risk_target > 0:
+        while True:
+            current_risk = portfolio_risk(q)
+            current_gap = abs(float(portfolio_risk_target) - current_risk)
+            candidates = []
+            for symbol in symbols:
+                desired_ceiling = min(
+                    max_contracts[symbol],
+                    max(1, math.ceil(continuous_contracts[symbol]) + 1),
+                )
+                if desired_ceiling <= 0 or abs(q[symbol]) >= desired_ceiling:
+                    continue
+                candidate = add_one(q, symbol)
+                if not feasible(candidate):
+                    continue
+                new_gap = abs(float(portfolio_risk_target) - portfolio_risk(candidate))
+                if new_gap < current_gap - 1e-9:
+                    candidates.append((new_gap, distance_from_continuous(candidate), symbol, candidate))
+            if not candidates:
+                break
+            _, _, _, q = min(candidates, key=lambda item: (item[0], item[1], item[2]))
+
+    # Finalize every valid row, including zeroed rows, from the same integer
+    # map.  The reason is only set when a single lot itself is infeasible; a
+    # feasible sub-half-contract signal remains diagnosable as the ordinary
+    # below-half rounding case.
+    for target in valid:
+        symbol = target['symbol']
+        count = q.get(symbol, 0)
+        target['target_con'] = count
+        target['pos_risk'] = abs(count) * one_contract_risk.get(symbol, 0.0)
+
+        if symbol in q and count == 0 and abs(float(target['contin_con'])) > 1e-12:
+            one_lot = add_one(q, symbol)
+            if portfolio_limit is not None and portfolio_risk(one_lot) > portfolio_limit + 1e-9:
+                target['integer_zero_reason'] = 'integer_risk_limit'
+            elif cluster_limit is not None and any(
+                    risk > cluster_limit + 1e-9
+                    for risk in cluster_risks(one_lot).values()):
+                target['integer_zero_reason'] = 'cluster_risk_limit'
+
+    return targets
+
+
 # Minimum rows in a bounded EWM correlation window before trusting the
 # estimate at all -- see _bounded_ewm_correlation_matrix's own docstring.
 MIN_IDM_WINDOW_ROWS = 63

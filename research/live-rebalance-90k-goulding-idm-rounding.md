@@ -221,3 +221,29 @@ current MES/MNQ result is internally consistent; the improvements are about
 making the discrete-risk consequence explicit and deciding whether live
 sizing should optimize for broader representation or closer realized-vol
 tracking.
+
+## v1.0 implementation of improvement 3
+
+The opt-in lot-aware policy is now implemented behind:
+
+```text
+--discrete-allocation lot-aware
+--discrete-risk-overrun-pct 0.00
+```
+
+The default remains `--discrete-allocation independent`, which preserves the
+prior per-symbol whole-contract rounding. In lot-aware mode, the allocator
+uses each symbol's one-contract dollar-vol risk, the IDM correlation matrix
+when available (identity otherwise), the account-level target
+`account_equity × target_portfolio_vol`, and the optional standalone cluster
+cap. It greedily chooses feasible cluster representatives, fits continuous
+targets, and uses spare risk capacity to move realized risk toward the target
+while allowing at most one lot beyond a symbol's continuous ceiling.
+
+The account risk limit is hard by default and can be relaxed explicitly with
+`--discrete-risk-overrun-pct`. A symbol that has a live signal but cannot fit
+one lot is retained at zero with `zero_reason=integer_risk_limit` or
+`cluster_risk_limit`; ordinary sub-half-contract rounding remains
+`below_half_contract`. The chosen policy and integer risk limit are included
+in the CSV and cluster report so a lot-aware run is distinguishable from the
+legacy path.

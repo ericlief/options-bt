@@ -151,6 +151,7 @@ def test_build_instruments_passes_through_max_notional_and_max_contracts():
     ('mixing_pool', 'bogus'),
     ('risk_budget_mode', 'bogus'),
     ('notional_weighting', 'bogus'),
+    ('discrete_allocation', 'bogus'),
     ('data_source', 'bogus'),
 ])
 def test_tsmom_live_config_rejects_unknown_values(field, value):
@@ -169,6 +170,13 @@ def test_tsmom_live_config_defaults_match_prior_behavior():
     assert config.slow_window == 252
     assert config.vol_fast_window is None
     assert config.vol_slow_window is None
+    assert config.discrete_allocation == 'independent'
+    assert config.discrete_risk_overrun_pct == 0.0
+
+
+def test_tsmom_live_config_rejects_negative_discrete_risk_overrun():
+    with pytest.raises(ValueError):
+        TsmomLiveConfig(discrete_risk_overrun_pct=-0.01)
 
 
 def test_tsmom_live_config_rejects_bad_windows():
