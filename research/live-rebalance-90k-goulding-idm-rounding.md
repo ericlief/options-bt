@@ -175,7 +175,7 @@ more gradual choice.
    - `contract_notional`
    - `one_contract_risk`
    - `symbol_risk_budget = budg_const × vol_target`
-   - `target_risk = targ_not × hv`
+   - unsigned `target_risk = abs(targ_not) × hv`
    - `rounding_gap`
    - `scalar_capped`
    - `zero_reason` such as `below_half_contract`
@@ -206,6 +206,15 @@ more gradual choice.
 6. The supplied `live.sh` shows a bare `--vol-fast-window` with no integer
    argument. The CLI requires a value for that option. It is ignored by
    Goulding mode, so it should either be removed or given an explicit value.
+
+## Implementation status
+
+Improvements 1–2 are now implemented in the live rebalance reporting path.
+Each target row exposes the contract hurdle, symbol risk budget, continuous-
+to-integer gap, scalar-cap flag, and zero-target reason. IDM runs also expose
+the base portfolio risk target, IDM-adjusted target, and realized post-rounding
+portfolio risk in both the CSV rows and the text report. These fields are
+diagnostic only and do not change position sizing.
 
 No conclusion in this note requires changing the current sizing code. The
 current MES/MNQ result is internally consistent; the improvements are about

@@ -576,6 +576,104 @@ def _current_contracts(ib: IBPySync, contract) -> int:
     return int(round(total))
 
 
+def _scalar_was_capped(target: dict) -> Optional[bool]:
+    """Whether the pre-VIX position scalar hit its [-1, 1] ceiling.
+
+    `compute_position_scalar` intentionally returns only the final scalar, so
+    reconstruct the uncapped product from the audit fields already attached to
+    a target.  The VIX scalar is <= 1.0, therefore it cannot create an upward
+    cap event after the position scalar has been computed.
+    """
+    if target.get('scalar') is None:
+        return None
+    components = (
+        target.get('signal'),
+        target.get('risk_scalar'),
+        target.get('reg_discount'),
+        target.get('sig_confid'),
+    )
+    if any(v is None or (isinstance(v, float) and math.isnan(v)) for v in components):
+        return None
+    raw = math.prod(float(v) for v in components)
+    return abs(raw) > 1.0 + 1e-12
+
+
+def _attach_sizing_diagnostics(targets: list[dict], *,
+                               portfolio_risk_target: Optional[float],
+                               idm_risk_target: Optional[float],
+                               realized_portfolio_risk: Optional[float]) -> None:
+    """Attach per-symbol and run-level sizing diagnostics to target rows.
+
+    These fields are deliberately informational.  They describe the
+    continuous target, the one-contract hurdle, and the final integer result;
+    they do not feed back into sizing.
+
+    `target_risk`, `contract_notional`, and `one_contract_risk` are unsigned
+    dollar values.  `rounding_gap` is measured in contracts and includes any
+    final max-contract clamp, so it is more precisely the continuous-to-final
+    discrete sizing gap.
+    """
+    for target in targets:
+        close = target.get('close')
+        multiplier = target.get('mult')
+        hv = target.get('hv')
+        contract_notional = None
+        one_contract_risk = None
+        if close is not None and multiplier is not None:
+            contract_notional = abs(float(close) * float(multiplier))
+            if hv is not None and not (isinstance(hv, float) and math.isnan(hv)):
+                one_contract_risk = contract_notional * abs(float(hv))
+
+        budget_constant = target.get('budg_const')
+        vol_target = target.get('vol_target')
+        symbol_risk_budget = None
+        if budget_constant is not None and vol_target is not None:
+            symbol_risk_budget = abs(float(budget_constant) * float(vol_target))
+
+        target_notional = target.get('targ_not')
+        target_risk = None
+        if target_notional is not None and hv is not None and not (
+                isinstance(hv, float) and math.isnan(hv)):
+            target_risk = abs(float(target_notional) * float(hv))
+
+        continuous_contracts = target.get('contin_con')
+        target_contracts = target.get('target_con')
+        rounding_gap = None
+        if continuous_contracts is not None and target_contracts is not None:
+            rounding_gap = abs(float(continuous_contracts) - float(target_contracts))
+
+        zero_reason = None
+        if target.get('error'):
+            zero_reason = 'error'
+        elif target_contracts is None:
+            if target.get('vol_regime') in (VolRegime.SPIKE, VolRegime.EXTREME):
+                zero_reason = 'vol_regime_hold'
+        elif target_contracts == 0:
+            if target.get('vol_regime') in (VolRegime.SPIKE, VolRegime.EXTREME):
+                zero_reason = 'vol_regime_hold'
+            elif target.get('active') is False:
+                zero_reason = 'inactive_signal'
+            elif continuous_contracts is None:
+                zero_reason = 'no_continuous_target'
+            elif abs(float(continuous_contracts)) < 0.5:
+                zero_reason = 'below_half_contract'
+            else:
+                zero_reason = 'cluster_cap_or_limit'
+
+        target.update({
+            'contract_notional': contract_notional,
+            'one_contract_risk': one_contract_risk,
+            'symbol_risk_budget': symbol_risk_budget,
+            'target_risk': target_risk,
+            'rounding_gap': rounding_gap,
+            'scalar_capped': _scalar_was_capped(target),
+            'zero_reason': zero_reason,
+            'portfolio_risk_target': portfolio_risk_target,
+            'idm_risk_target': idm_risk_target,
+            'realized_portfolio_risk': realized_portfolio_risk,
+        })
+
+
 # ------------------------------------------------------------------
 # Main orchestration
 # ------------------------------------------------------------------
@@ -1289,6 +1387,16 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                 'max_clust_risk_pct': config.max_cluster_risk_pct,
                 'max_lot_over_pct': config.max_lot_overrun_pct,
             })
+        portfolio_risk_target = (
+            config.account_equity * config.target_portfolio_vol
+            if config.account_equity else None
+        )
+        _attach_sizing_diagnostics(
+            targets,
+            portfolio_risk_target=portfolio_risk_target,
+            idm_risk_target=None,
+            realized_portfolio_risk=None,
+        )
         return targets
 
     vix_scalar = VX_ELEVATED_SCALE if vol_regime == VolRegime.ELEVATED else 1.0
@@ -1585,7 +1693,12 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                 'error': str(exc),
             })
 
-    total_risk_target = config.account_equity * config.target_portfolio_vol if config.account_equity else None
+    portfolio_risk_target = (
+        config.account_equity * config.target_portfolio_vol
+        if config.account_equity else None
+    )
+    idm_risk_target = None
+    total_risk_target = portfolio_risk_target
     if config.risk_budget_mode == 'idm' and total_risk_target is not None:
         # Keep the cap consistent with the diversification credit
         # compute_symbol_notional_budget already used to size these
@@ -1593,6 +1706,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
         # docstring for why leaving this unscaled silently claws that
         # credit back.
         total_risk_target *= idm_multiplier
+        idm_risk_target = total_risk_target
     apply_cluster_risk_cap(targets, config.max_cluster_risk_pct, total_risk_target, n_effective,
                           max_lot_overrun_pct=config.max_lot_overrun_pct,
                           apply_cap=config.apply_cluster_cap)
@@ -1609,6 +1723,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
     # idm_multiplier above -- not "how much can the book be scaled up",
     # but "given the ACTUAL rounded positions, what does each symbol
     # really contribute to total portfolio risk."
+    realized_portfolio_risk = None
     if H is not None and active_symbols:
         # Signed by target_con's direction -- see compute_realized_
         # portfolio_risk's own docstring for why an unsigned magnitude
@@ -1619,9 +1734,17 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                            if not t.get('error') and t.get('pos_risk') is not None
                            and t.get('target_con') is not None}
         realized = compute_realized_portfolio_risk(active_symbols, H, dollar_exposure)
+        realized_portfolio_risk = realized['port_vol']
         for t in targets:
             if t['symbol'] in realized['risk_contrib']:
                 t['risk_contrib'] = realized['risk_contrib'][t['symbol']]
+
+    _attach_sizing_diagnostics(
+        targets,
+        portfolio_risk_target=portfolio_risk_target,
+        idm_risk_target=idm_risk_target,
+        realized_portfolio_risk=realized_portfolio_risk,
+    )
 
     return targets
 
@@ -1736,9 +1859,16 @@ def print_rebalance_report(targets: list[dict]) -> str:
               f"budg_const={_fmt(t.get('budg_const'), '.0f')}"
             + (f"  weight={_fmt(t.get('not_weight'), '.3f')}" if t.get('not_weight') is not None else "")
             + (f"  idm_mult={_fmt(t.get('idm_mult'), '.3f')}" if t.get('idm_mult') is not None else "")
-            + f"  targ_not={_fmt(t.get('targ_not'), '.0f')}  "
+            + f"  symbol_risk_budget={_fmt(t.get('symbol_risk_budget'), '.0f')}  "
+              f"target_risk={_fmt(t.get('target_risk'), '.0f')}  "
+              f"targ_not={_fmt(t.get('targ_not'), '.0f')}  "
               f"close={_fmt(t.get('close'), '.2f'):>9}  "
-              f"contin_con={_fmt(t.get('contin_con'), '.3f'):>7}"
+              f"contract_notional={_fmt(t.get('contract_notional'), '.0f')}  "
+              f"one_contract_risk={_fmt(t.get('one_contract_risk'), '.0f')}  "
+              f"contin_con={_fmt(t.get('contin_con'), '.3f'):>7}  "
+              f"rounding_gap={_fmt(t.get('rounding_gap'), '.3f')}  "
+              f"scalar_capped={t.get('scalar_capped')}"
+            + (f"  zero_reason={t.get('zero_reason')}" if t.get('zero_reason') else "")
             + ("  INFEASIBLE (cluster cap < min contract risk in this cluster)" if t.get('infeasible') else "")
         )
     report = '\n'.join(lines)
@@ -1811,6 +1941,15 @@ def print_cluster_risk_report(targets: list[dict], account_equity: Optional[floa
         if account_equity:
             total_line += f" ({total_risk_contrib / account_equity:>5.1%})"
     lines.append(total_line)
+    context = next((t for t in targets if t.get('portfolio_risk_target') is not None), None)
+    if context is not None:
+        lines.append(
+            f"TARGETS       portfolio_risk_target={context['portfolio_risk_target']:,.0f}"
+            + (f"  idm_risk_target={context['idm_risk_target']:,.0f}"
+               if context.get('idm_risk_target') is not None else '')
+            + (f"  realized_portfolio_risk={context['realized_portfolio_risk']:,.0f}"
+               if context.get('realized_portfolio_risk') is not None else '')
+        )
     report = '\n'.join(lines)
     print(report)
     return report

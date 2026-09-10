@@ -220,6 +220,24 @@ def test_compute_rebalance_targets_database_mode_needs_no_ib(monkeypatch):
     assert t['target_con'] is not None
 
 
+def test_sizing_diagnostics_expose_contract_hurdle_and_targets(monkeypatch):
+    price_data = {'X': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=1)}
+    _patch_db(monkeypatch, price_data)
+
+    config = TsmomLiveConfig(account_equity=100_000, data_source='database')
+    target = compute_rebalance_targets([_instrument('X', multiplier=50.0)], config, ib=None)[0]
+
+    assert target['contract_notional'] == pytest.approx(target['close'] * target['mult'])
+    assert target['one_contract_risk'] == pytest.approx(target['contract_notional'] * target['hv'])
+    assert target['symbol_risk_budget'] == pytest.approx(target['budg_const'] * config.vol_target)
+    assert target['target_risk'] == pytest.approx(abs(target['targ_not']) * target['hv'])
+    assert target['rounding_gap'] == pytest.approx(abs(target['contin_con'] - target['target_con']))
+    assert target['scalar_capped'] in (True, False)
+    assert target['portfolio_risk_target'] == pytest.approx(100_000 * config.target_portfolio_vol)
+    assert target['idm_risk_target'] is None
+    assert target['realized_portfolio_risk'] is None
+
+
 def test_compute_rebalance_targets_database_mode_respects_as_of(monkeypatch):
     price_data = {'X': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=1)}
     _patch_db(monkeypatch, price_data)
@@ -408,13 +426,20 @@ def test_risk_contribution_attached_to_targets_under_idm_mode(monkeypatch):
                              notional_weighting='erc', as_of=as_of)
     targets = compute_rebalance_targets([_instrument('A'), _instrument('B'), _instrument('C')], config, ib=None)
 
+    base_target = 1_000_000 * config.target_portfolio_vol
     for t in targets:
         if not t.get('error'):
             assert 'risk_contrib' in t
+            assert t['portfolio_risk_target'] == pytest.approx(base_target)
+            assert t['idm_risk_target'] == pytest.approx(base_target * t['idm_mult'])
+            assert t['realized_portfolio_risk'] is not None
 
     report = tr.print_cluster_risk_report(targets)
     assert 'risk_contrib=' in report
     assert 'pos_risk=' in report
+    assert 'portfolio_risk_target=' in report
+    assert 'idm_risk_target=' in report
+    assert 'realized_portfolio_risk=' in report
 
 
 def test_risk_contribution_absent_under_cluster_mode(monkeypatch):

@@ -188,8 +188,11 @@ def _save_report(cluster_report: str, targets: list[dict], mixing_diagnostics: O
                 'sig_confid_reg', 'sig_confid', 'vol_ratio', 'vix_scalar',
                 'combined_scalar', 'idm_mult',
                 'acct_equity', 'n_effect',
+                'portfolio_risk_target', 'idm_risk_target', 'realized_portfolio_risk',
                 'risk_budget', 'vol_target', 'targ_port_vol', 'budg_const', 'not_weight',
-                'pos_risk', 'risk_contrib', 'raw_not', 'targ_not',
+                'symbol_risk_budget', 'target_risk', 'pos_risk', 'risk_contrib',
+                'raw_not', 'targ_not', 'contract_notional', 'one_contract_risk',
+                'rounding_gap', 'scalar_capped', 'zero_reason',
                 'max_clust_risk_pct', 'max_lot_over_pct']
     rounded_rows = [
         {_CSV_COLUMN_RENAME.get(k, k): (round(v, 4) if isinstance(v, float) and not math.isnan(v) else v)
