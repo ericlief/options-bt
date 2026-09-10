@@ -56,15 +56,11 @@ log = logging.getLogger(__name__)
 
 DEFAULT_MAX_NOTIONAL = float(os.getenv('TSMOM_DEFAULT_MAX_NOTIONAL', '0')) or None
 
-# CSV-column relabeling only -- the underlying targets dict keeps 'signal'/
-# 'scalar' (apply_cluster_risk_cap sorts by 'scalar', and tsmom_backtester.py
-# shares that naming for cross-system parity), but print_rebalance_report
-# labels them g_sig/combined_scalar for a human reader (g_sig to match
-# contin_sig's naming, even though under signal_weighting='continuous' it
-# carries continuous_momentum's own signal, not a goulding-only value).
-# Applying the same rename at the CSV boundary keeps both saved artifacts
-# from a single run consistent with each other.
-_CSV_COLUMN_RENAME = {'signal': 'g_sig', 'scalar': 'combined_scalar'}
+# CSV-column relabeling only -- the underlying target dict keeps `signal`, but
+# the report uses `g_sig` to distinguish the selected direction signal from
+# continuous-momentum's separate `contin_sig` audit field. `combined_scalar`
+# is already the canonical target-dict name.
+_CSV_COLUMN_RENAME = {'signal': 'g_sig'}
 
 
 def configure_logging():
@@ -123,8 +119,8 @@ def _save_report(cluster_report: str, targets: list[dict], mixing_diagnostics: O
     Only print_cluster_risk_report's output goes to the .txt file --
     print_rebalance_report's own per-instrument dump is redundant with the
     CSV (every field it prints, plus more, is a CSV column) and duplicated
-    every field the cluster report doesn't already summarize; risk_contrib
-    (when present -- only under risk_budget_mode='idm', see
+    every field the cluster report doesn't already summarize; portfolio risk
+    contribution (when present -- only under risk_budget_mode='idm', see
     compute_rebalance_targets' own docstring) already flows into the CSV
     automatically via all_keys below, no separate handling needed there.
 
@@ -177,26 +173,26 @@ def _save_report(cluster_report: str, targets: list[dict], mixing_diagnostics: O
     # even in 'goulding' mode -- kept apart from the goulding block above
     # so the two models' columns never interleave), and finally the
     # sizing-math trail / run-level (CLI-echoed) params, in the order
-    # you'd actually want to follow that calculation. target_con/
-    # contin_con/mult/max_con are also abbreviated here -- see
-    # domain.allocation.apply_cluster_risk_cap (shared with the backtest
-    # CSV), which was updated to read/write these exact abbreviated key
-    # names on this same targets list.
-    priority = ['symbol', 'cur_con', 'target_con', 'contin_con', 'infeasible',
+    # you'd actually want to follow that calculation.
+    priority = ['symbol', 'current_contracts', 'final_target_contracts',
+                'fractional_target_contracts', 'max_contracts', 'infeasible',
                 'g_regime', 'g_fast', 'g_slow', 'a_co', 'a_re', 'g_blend', 'g_sig',
                 'vol_regime', 'ts_fast', 'ts_slow', 'ts', 'contin_sig', 'ts_regime',
                 'risk_scalar', 'reg_discount',
                 'sig_confid_reg', 'sig_confid', 'vol_ratio', 'vix_scalar',
-                'combined_scalar', 'idm_mult',
-                'acct_equity', 'n_effect',
+                'combined_scalar', 'idm_multiplier',
+                'account_equity', 'n_effective_clusters',
                 'portfolio_risk_target', 'idm_risk_target', 'realized_portfolio_risk',
                 'discrete_allocation', 'discrete_risk_overrun_pct', 'integer_risk_limit',
                 'integer_zero_reason',
-                'risk_budget', 'vol_target', 'targ_port_vol', 'budg_const', 'not_weight',
-                'symbol_risk_budget', 'target_risk', 'pos_risk', 'risk_contrib',
-                'raw_not', 'targ_not', 'contract_notional', 'one_contract_risk',
+                'cluster_dollar_vol_budget', 'vol_target', 'target_portfolio_vol',
+                'pre_scalar_notional_budget', 'notional_allocation_weight',
+                'allocated_dollar_vol_budget', 'fractional_target_dollar_vol',
+                'standalone_position_dollar_vol', 'portfolio_risk_contribution',
+                'uncapped_target_notional', 'target_notional', 'one_contract_notional',
+                'one_contract_dollar_vol',
                 'rounding_gap', 'scalar_capped', 'zero_reason',
-                'max_clust_risk_pct', 'max_lot_over_pct']
+                'max_cluster_risk_pct', 'max_lot_overrun_pct']
     rounded_rows = [
         {_CSV_COLUMN_RENAME.get(k, k): (round(v, 4) if isinstance(v, float) and not math.isnan(v) else v)
          for k, v in t.items()}
@@ -215,7 +211,7 @@ def _save_report(cluster_report: str, targets: list[dict], mixing_diagnostics: O
 
 def _execute_rebalance_order(ib: IBPySync, contract, delta_contracts: int):
     """Simple limit-at-mid (falls back to market) order for the size delta
-    needed to reach target_con from cur_con."""
+    needed to reach final_target_contracts from current_contracts."""
     action = 'BUY' if delta_contracts > 0 else 'SELL'
     qty = abs(delta_contracts)
     ticker = ib.req_mkt_data(contract)
@@ -368,7 +364,7 @@ def parse_args():
                         "%(default)s). 'ib': live IB historical bars + the live VX/VIX spike gate -- "
                         "requires a connection. 'database': the same local futures duckdb/VIX parquet "
                         "the backtest reads from, no IB connection anywhere -- runnable in a notebook "
-                        "for signal/regime inspection with no live account (cur_con is "
+                        "for signal/regime inspection with no live account (current_contracts is "
                         "always None in this mode; --live/order placement requires 'ib')")
     p.add_argument('--as-of', default=None,
                    help='Only used with --data-source database: YYYY-MM-DD to compute signals as of '
@@ -493,17 +489,18 @@ def main():
 
         instr_by_symbol = {i['symbol']: i for i in instruments}
         for t in targets:
-            if t.get('error') or t['target_con'] is None or t['cur_con'] is None:
+            if (t.get('error') or t['final_target_contracts'] is None
+                    or t['current_contracts'] is None):
                 log.warning('Skipping %s — no valid target', t['symbol'])
                 continue
-            delta = t['target_con'] - t['cur_con']
+            delta = t['final_target_contracts'] - t['current_contracts']
             if delta == 0:
-                log.info('%s already at target (%d) — no order', t['symbol'], t['target_con'])
+                log.info('%s already at target (%d) — no order', t['symbol'], t['final_target_contracts'])
                 continue
             instr = instr_by_symbol[t['symbol']]
             contract = _resolve_contract(ib, instr, min_days=7)
             log.info('%s: current=%d target=%d delta=%+d', t['symbol'],
-                     t['cur_con'], t['target_con'], delta)
+                     t['current_contracts'], t['final_target_contracts'], delta)
             trade = _execute_rebalance_order(ib, contract, delta)
             status = trade.orderStatus.status
             log.info('%s order status: %s', t['symbol'], status)

@@ -595,7 +595,7 @@ def test_realized_portfolio_risk_decomposes_exactly_to_port_vol():
 
     result = compute_realized_portfolio_risk(symbols, H, position_risk)
 
-    assert sum(result['risk_contrib'].values()) == pytest.approx(result['port_vol'], rel=1e-9)
+    assert sum(result['portfolio_risk_contribution'].values()) == pytest.approx(result['port_vol'], rel=1e-9)
 
 
 def test_realized_portfolio_risk_credits_diversifier_less_than_correlated_pair():
@@ -614,7 +614,7 @@ def test_realized_portfolio_risk_credits_diversifier_less_than_correlated_pair()
     position_risk = {'A': 10_000.0, 'B': 10_000.0, 'C': 10_000.0}
 
     result = compute_realized_portfolio_risk(symbols, H, position_risk)
-    rc = result['risk_contrib']
+    rc = result['portfolio_risk_contribution']
 
     assert rc['C'] < position_risk['C']
     assert rc['A'] == pytest.approx(rc['B'])
@@ -625,7 +625,7 @@ def test_realized_portfolio_risk_zero_positions_gives_zero_vol():
     symbols = ['A', 'B', 'C']
     result = compute_realized_portfolio_risk(symbols, _CORRELATED_PAIR_H, {})
     assert result['port_vol'] == 0.0
-    assert all(v == 0.0 for v in result['risk_contrib'].values())
+    assert all(v == 0.0 for v in result['portfolio_risk_contribution'].values())
 
 
 def test_realized_portfolio_risk_missing_symbol_defaults_to_no_position():
@@ -654,12 +654,12 @@ def test_realized_portfolio_risk_short_nets_against_correlated_long():
     assert opposite_signed['port_vol'] < same_signed['port_vol']
 
 
-def test_realized_portfolio_risk_small_hedge_gets_negative_contribution():
+def test_realized_portfolio_risk_small_hedge_gets_negative_portfolio_risk_contribution():
     # A big long (A) plus a SMALL short (B) in something correlated at 0.9:
     # increasing B's short further, at the margin, still reduces total
     # portfolio variance (B hasn't "used up" its hedging capacity against
     # A's much larger size yet) -- Euler decomposition assigns that a
-    # genuine negative risk_contribution. This is the direction-driven
+    # genuine negative portfolio risk contribution. This is the direction-driven
     # negative RC compute_realized_portfolio_risk is meant to surface;
     # it requires SIGNED exposure (an unsigned magnitude can never
     # produce it here, since B is the smaller position -- with unsigned
@@ -668,8 +668,8 @@ def test_realized_portfolio_risk_small_hedge_gets_negative_contribution():
     symbols = ['A', 'B', 'C']
     result = compute_realized_portfolio_risk(symbols, _CORRELATED_PAIR_H, {'A': 10_000.0, 'B': -2_000.0})
 
-    assert result['risk_contrib']['B'] < 0
-    assert sum(result['risk_contrib'].values()) == pytest.approx(result['port_vol'], rel=1e-9)
+    assert result['portfolio_risk_contribution']['B'] < 0
+    assert sum(result['portfolio_risk_contribution'].values()) == pytest.approx(result['port_vol'], rel=1e-9)
 
 
 # ── apply_cluster_risk_cap ───────────────────────────────────────────────────
@@ -682,7 +682,7 @@ def test_realized_portfolio_risk_small_hedge_gets_negative_contribution():
 # the book.
 #
 # Within an over-budget cluster, allocation is GREEDY BY CONVICTION
-# PRIORITY (priority = abs(scalar), descending), not a uniform haircut --
+# PRIORITY (priority = abs(combined_scalar), descending), not a uniform haircut --
 # a uniform scale factor can push every instrument below the 0.5 rounding
 # threshold at once, even when the top-conviction instrument alone would
 # easily survive on the full cap. A bounded lot-size exception (gated to
@@ -692,7 +692,7 @@ def test_realized_portfolio_risk_small_hedge_gets_negative_contribution():
 # wildly over the cap.
 #
 # infeasible is OUTCOME-based: True only when every instrument in a
-# cluster ends at target_con == 0 despite at least one having a
+# cluster ends at final_target_contracts == 0 despite at least one having a
 # genuine (>=0.5) pre-cap signal -- not a cap-vs-single-contract-risk
 # precomputation, since the top-priority instrument may still land a
 # contract via the lot exception even when that precomputed check would
@@ -701,17 +701,21 @@ def test_realized_portfolio_risk_small_hedge_gets_negative_contribution():
 def _target(symbol, cluster, continuous_contracts, close=100.0, multiplier=10.0, hv=0.2,
             max_contracts=None, target_contracts=None, scalar=0.0):
     return {
-        'symbol': symbol, 'cluster': cluster, 'contin_con': continuous_contracts,
-        'scalar': scalar,
-        # target_con simulates whatever the caller (tsmom_rebalance.py)
-        # already computed upstream, pre-cluster-cap -- rounding+pos_risk
+        'symbol': symbol, 'cluster': cluster,
+        'fractional_target_contracts': continuous_contracts,
+        'combined_scalar': scalar,
+        # final_target_contracts simulates whatever the caller
+        # (tsmom_rebalance.py) already computed upstream; rounding and
+        # standalone_position_dollar_vol
         # always overwrite it (see apply_cluster_risk_cap's own `apply_cap`
         # docstring: even with the cap fully disabled, only the cluster-level
         # redistribution is skipped, not rounding), so a sentinel value here
         # is only meaningful in a test that explicitly checks it gets
         # overwritten, not one relying on it staying untouched.
-        'target_con': target_contracts if target_contracts is not None else round(continuous_contracts),
-        'close': close, 'mult': multiplier, 'hv': hv, 'max_con': max_contracts,
+        'final_target_contracts': (
+            target_contracts if target_contracts is not None else round(continuous_contracts)
+        ),
+        'close': close, 'mult': multiplier, 'hv': hv, 'max_contracts': max_contracts,
     }
 
 
@@ -730,10 +734,10 @@ def test_lot_aware_allocator_prefers_feasible_cluster_representative():
         active_symbols=['A', 'B'],
     )
 
-    assert out[0]['target_con'] == 1
-    assert out[1]['target_con'] == 0
+    assert out[0]['final_target_contracts'] == 1
+    assert out[1]['final_target_contracts'] == 0
     assert out[1]['integer_zero_reason'] == 'integer_risk_limit'
-    assert out[0]['pos_risk'] == pytest.approx(4_000)
+    assert out[0]['standalone_position_dollar_vol'] == pytest.approx(4_000)
 
 
 def test_lot_aware_allocator_preserves_direction_and_hard_limit():
@@ -748,9 +752,9 @@ def test_lot_aware_allocator_preserves_direction_and_hard_limit():
         active_symbols=['LONG', 'SHORT'],
     )
 
-    assert out[0]['target_con'] >= 0
-    assert out[1]['target_con'] <= 0
-    realized = math.sqrt(sum(t['pos_risk'] ** 2 for t in out))
+    assert out[0]['final_target_contracts'] >= 0
+    assert out[1]['final_target_contracts'] <= 0
+    realized = math.sqrt(sum(t['standalone_position_dollar_vol'] ** 2 for t in out))
     assert realized <= 15 + 1e-9
 
 
@@ -765,13 +769,13 @@ def test_cluster_cap_floor_table(n_active_clusters, expected_pct):
     total_risk_target = 1000.0
     out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
                                  total_risk_target=total_risk_target, n_active_clusters=n_active_clusters)
-    assert out[0]['target_con'] == 10
+    assert out[0]['final_target_contracts'] == 10
 
     big_targets = [_target('MES', 'equity', continuous_contracts=100, close=100, multiplier=1, hv=0.1, scalar=0.9)]  # risk=1000
     out_big = apply_cluster_risk_cap(big_targets, max_cluster_risk_pct=0.25,
                                      total_risk_target=total_risk_target, n_active_clusters=n_active_clusters)
     expected_risk = expected_pct * total_risk_target
-    assert math.isclose(out_big[0]['pos_risk'], expected_risk, rel_tol=0.05)
+    assert math.isclose(out_big[0]['standalone_position_dollar_vol'], expected_risk, rel_tol=0.05)
 
 
 def test_cluster_cap_fixed_denominator_not_inflated_by_correlated_cluster():
@@ -796,7 +800,9 @@ def test_cluster_cap_fixed_denominator_not_inflated_by_correlated_cluster():
                                  total_risk_target=total_risk_target, n_active_clusters=n_active_clusters)
     by_symbol = {t['symbol']: t for t in out}
 
-    grain_risk = sum(by_symbol[s]['pos_risk'] for s in ('MZC', 'MZS', 'MZW', 'MZL'))
+    grain_risk = sum(
+        by_symbol[s]['standalone_position_dollar_vol'] for s in ('MZC', 'MZS', 'MZW', 'MZL')
+    )
     cap = max(0.25, 1 / n_active_clusters) * total_risk_target  # = 200
     assert grain_risk <= cap * 1.1
     assert grain_risk < 600  # rescaled down from the 600 pre-cap sum
@@ -816,8 +822,8 @@ def test_cluster_cap_leaves_single_instrument_cluster_dominant_clusters_alone():
     out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
                                  total_risk_target=total_risk_target, n_active_clusters=3)
     by_symbol = {t['symbol']: t for t in out}
-    assert abs(by_symbol['MES']['target_con']) < 3
-    assert by_symbol['MGC']['target_con'] == 1  # 100 < 200 cap, untouched
+    assert abs(by_symbol['MES']['final_target_contracts']) < 3
+    assert by_symbol['MGC']['final_target_contracts'] == 1  # 100 < 200 cap, untouched
 
 
 def test_cluster_cap_no_op_when_all_clusters_within_budget():
@@ -829,7 +835,7 @@ def test_cluster_cap_no_op_when_all_clusters_within_budget():
     ]
     out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
                                  total_risk_target=100_000.0, n_active_clusters=4)
-    assert all(t['target_con'] == 1 for t in out)
+    assert all(t['final_target_contracts'] == 1 for t in out)
 
 
 def test_cluster_cap_within_budget_cluster_untouched():
@@ -839,33 +845,34 @@ def test_cluster_cap_within_budget_cluster_untouched():
     targets = [_target('A', 'c', continuous_contracts=1.3, close=100, multiplier=1, hv=1.0, scalar=0.9)]
     out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
                                  total_risk_target=1_000_000.0, n_active_clusters=1)
-    assert out[0]['target_con'] == 1
+    assert out[0]['final_target_contracts'] == 1
     assert not out[0].get('infeasible')
 
 
 def test_cluster_cap_skips_error_targets():
     targets = [
         _target('MES', 'equity', continuous_contracts=1, close=100, multiplier=10, hv=0.1, scalar=0.5),
-        {'symbol': 'MCL', 'error': 'boom', 'target_con': None},
+        {'symbol': 'MCL', 'error': 'boom', 'final_target_contracts': None},
     ]
     out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
                                  total_risk_target=1000.0, n_active_clusters=1)
     errored = next(t for t in out if t['symbol'] == 'MCL')
     assert errored['error'] == 'boom'
-    assert errored['target_con'] is None
+    assert errored['final_target_contracts'] is None
 
 
 def test_cluster_cap_zero_total_risk_target_skips_cap_not_rounding():
     # A None/zero total_risk_target disables the CAP, not rounding -- use a
-    # sentinel target_con that would only survive if the function
+    # sentinel final_target_contracts that would only survive if the function
     # genuinely didn't touch it, to prove it's NOT a true no-op: rounding
-    # and pos_risk still get (re)computed from contin_con.
+    # and standalone position dollar-vol still get recomputed from the
+    # fractional target contracts.
     targets = [_target('MES', 'equity', continuous_contracts=5.3, target_contracts=999,
                        close=100, multiplier=10, hv=0.1)]
     out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
                                  total_risk_target=0.0, n_active_clusters=1)
-    assert out[0]['target_con'] == 5
-    assert out[0]['pos_risk'] == pytest.approx(5 * 100 * 10 * 0.1)
+    assert out[0]['final_target_contracts'] == 5
+    assert out[0]['standalone_position_dollar_vol'] == pytest.approx(5 * 100 * 10 * 0.1)
 
 
 def test_cluster_cap_none_total_risk_target_skips_cap_not_rounding():
@@ -873,8 +880,8 @@ def test_cluster_cap_none_total_risk_target_skips_cap_not_rounding():
                        close=100, multiplier=10, hv=0.1)]
     out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
                                  total_risk_target=None, n_active_clusters=1)
-    assert out[0]['target_con'] == 5
-    assert out[0]['pos_risk'] == pytest.approx(5 * 100 * 10 * 0.1)
+    assert out[0]['final_target_contracts'] == 5
+    assert out[0]['standalone_position_dollar_vol'] == pytest.approx(5 * 100 * 10 * 0.1)
 
 
 def test_cluster_cap_apply_cap_false_skips_cap_not_rounding():
@@ -894,8 +901,8 @@ def test_cluster_cap_apply_cap_false_skips_cap_not_rounding():
     # Would be aggressively capped/reprioritized if apply_cap were True
     # (cap = 0.01*100 = $1) -- instead both round their continuous value
     # directly, untouched by any cluster-level redistribution.
-    assert out[0]['target_con'] == 10
-    assert out[1]['target_con'] == 10
+    assert out[0]['final_target_contracts'] == 10
+    assert out[1]['final_target_contracts'] == 10
     assert not out[0].get('infeasible')
     assert not out[1].get('infeasible')
 
@@ -918,20 +925,20 @@ def test_cluster_cap_zero_n_active_clusters_falls_back_to_max_cluster_risk_pct()
     targets = [_target('MES', 'equity', continuous_contracts=100, close=100, multiplier=1, hv=0.1, scalar=0.9)]  # risk=1000
     out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
                                  total_risk_target=1000.0, n_active_clusters=0)
-    assert math.isclose(out[0]['pos_risk'], 0.25 * 1000.0, rel_tol=0.05)
+    assert math.isclose(out[0]['standalone_position_dollar_vol'], 0.25 * 1000.0, rel_tol=0.05)
 
 
-def test_cluster_cap_max_con_clamp_applied_after_cap_not_before():
-    # max_con is applied as the TRUE last step (after the cluster-
+def test_cluster_cap_max_contracts_clamp_applied_after_cap_not_before():
+    # max_contracts is applied as the TRUE last step (after the cluster-
     # cap allocation), not before. Single uncapped-cluster instrument:
-    # continuous=10, no cluster pressure (cap is huge), so target_con
-    # would be 10 without a clamp -- max_con=3 must still bring it
+    # continuous=10, no cluster pressure (cap is huge), so the final target
+    # would be 10 without a clamp -- max_contracts=3 must still bring it
     # down to 3 at the very end.
     targets = [_target('MES', 'equity', continuous_contracts=10, close=100, multiplier=1, hv=0.1,
                        max_contracts=3, scalar=0.9)]
     out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
                                  total_risk_target=1_000_000.0, n_active_clusters=1)
-    assert out[0]['target_con'] == 3
+    assert out[0]['final_target_contracts'] == 3
 
 
 def test_cluster_cap_walk_down_three_instruments_partial_consumption():
@@ -948,11 +955,11 @@ def test_cluster_cap_walk_down_three_instruments_partial_consumption():
                                  total_risk_target=1000.0, n_active_clusters=1)
     by_symbol = {t['symbol']: t for t in out}
     # A: affordable=1000/300=3.33, usable=min(2.0,3.33)=2.0 -> 2 contracts, remaining=1000-600=400
-    assert by_symbol['A']['target_con'] == 2
+    assert by_symbol['A']['final_target_contracts'] == 2
     # B: affordable=400/300=1.33, usable=min(1.0,1.33)=1.0 -> 1 contract, remaining=400-300=100
-    assert by_symbol['B']['target_con'] == 1
+    assert by_symbol['B']['final_target_contracts'] == 1
     # C: affordable=100/300=0.33<0.5, not first -> 0
-    assert by_symbol['C']['target_con'] == 0
+    assert by_symbol['C']['final_target_contracts'] == 0
     assert not any(t.get('infeasible') for t in out)  # A got real exposure -- not infeasible
 
 
@@ -979,8 +986,8 @@ def test_cluster_cap_greedy_diverges_from_old_proportional_haircut():
     # B: affordable=150/400=0.375<0.5, not first -> 0. This is the accepted tradeoff: B would
     # have survived (1 contract) under the old uniform haircut but gets zero under greedy --
     # not a regression to "fix", a deliberate design choice (top conviction wins the budget).
-    assert by_symbol['A']['target_con'] == 1
-    assert by_symbol['B']['target_con'] == 0
+    assert by_symbol['A']['final_target_contracts'] == 1
+    assert by_symbol['B']['final_target_contracts'] == 0
 
 
 @pytest.mark.parametrize('single_contract_risk,expect_exception', [
@@ -998,9 +1005,9 @@ def test_cluster_cap_lot_overrun_boundary(single_contract_risk, expect_exception
                                  total_risk_target=1000.0, n_active_clusters=1,
                                  max_lot_overrun_pct=1.5)
     if expect_exception:
-        assert out[0]['target_con'] == 1
+        assert out[0]['final_target_contracts'] == 1
     else:
-        assert out[0]['target_con'] == 0
+        assert out[0]['final_target_contracts'] == 0
         assert out[0]['infeasible'] is True
 
 
@@ -1022,10 +1029,10 @@ def test_cluster_cap_lot_exception_never_applies_past_first_instrument():
                                  max_lot_overrun_pct=2.0)
     by_symbol = {t['symbol']: t for t in out}
     # A (first, scalar=0.9): affordable=1000/400=2.5, usable=min(1.0,2.5)=1.0 -> 1, remaining=600.
-    assert by_symbol['A']['target_con'] == 1
+    assert by_symbol['A']['final_target_contracts'] == 1
     # B (second): affordable=600/2500=0.24<0.5, not first -> exception gated off -> 0,
     # even though B would have qualified had it been evaluated first.
-    assert by_symbol['B']['target_con'] == 0
+    assert by_symbol['B']['final_target_contracts'] == 0
 
 
 def test_cluster_cap_infeasible_when_cap_below_single_contract_risk():
@@ -1040,7 +1047,7 @@ def test_cluster_cap_infeasible_when_cap_below_single_contract_risk():
     out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
                                  total_risk_target=1000.0, n_active_clusters=1)
     assert out[0]['infeasible'] is True
-    assert out[0]['target_con'] == 0  # scale-equivalent (1000/3300=0.303) * 1.0 < 0.5
+    assert out[0]['final_target_contracts'] == 0  # scale-equivalent (1000/3300=0.303) * 1.0 < 0.5
 
 
 def test_cluster_cap_not_infeasible_when_walk_down_captures_exposure():
@@ -1053,7 +1060,7 @@ def test_cluster_cap_not_infeasible_when_walk_down_captures_exposure():
     out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
                                  total_risk_target=600.0, n_active_clusters=1)  # cap=600
     assert not any(t.get('infeasible') for t in out)
-    assert any(t['target_con'] != 0 for t in out)
+    assert any(t['final_target_contracts'] != 0 for t in out)
 
 
 def test_cluster_cap_mes_mnq_80k_scenario():
@@ -1069,8 +1076,8 @@ def test_cluster_cap_mes_mnq_80k_scenario():
     out = apply_cluster_risk_cap(targets, max_cluster_risk_pct=0.25,
                                  total_risk_target=80_000 * 0.15, n_active_clusters=3)
     by_symbol = {t['symbol']: t for t in out}
-    assert by_symbol['MES']['target_con'] == 1
-    assert by_symbol['MNQ']['target_con'] == 0
+    assert by_symbol['MES']['final_target_contracts'] == 1
+    assert by_symbol['MNQ']['final_target_contracts'] == 0
     assert not by_symbol['MES'].get('infeasible')
     assert not by_symbol['MNQ'].get('infeasible')  # cluster captured exposure via MES -- not infeasible
 
@@ -1103,8 +1110,8 @@ def test_cluster_cap_es_nq_million_dollar_scenario_recomputed_for_greedy():
                                  total_risk_target=total_risk_target, n_active_clusters=n_active_clusters)
     by_symbol = {t['symbol']: t for t in out}
 
-    assert by_symbol['ES']['target_con'] == 1
-    assert by_symbol['NQ']['target_con'] == 0
+    assert by_symbol['ES']['final_target_contracts'] == 1
+    assert by_symbol['NQ']['final_target_contracts'] == 0
     # The cluster DID capture exposure (via ES) -- not infeasible, even
     # though a precomputed cap-vs-single-contract-risk check alone would
     # have said it should be.
@@ -1135,18 +1142,18 @@ def test_cluster_cap_live_session_scenario_recomputed_for_greedy_priority():
     by_symbol = {t['symbol']: t for t in out}
 
     # Equity: only one instrument, no competition.
-    assert by_symbol['MES']['target_con'] == 1
+    assert by_symbol['MES']['final_target_contracts'] == 1
     # Grain: MZC (scalar 0.80, highest) wins the cluster's cap; the others
     # (lower priority) get nothing once MZC's allocation exhausts it.
-    assert by_symbol['MZC']['target_con'] < 0  # short, sign preserved
-    assert by_symbol['MZL']['target_con'] == 0
-    assert by_symbol['MZS']['target_con'] == 0
-    assert by_symbol['MZW']['target_con'] == 0
+    assert by_symbol['MZC']['final_target_contracts'] < 0  # short, sign preserved
+    assert by_symbol['MZL']['final_target_contracts'] == 0
+    assert by_symbol['MZS']['final_target_contracts'] == 0
+    assert by_symbol['MZW']['final_target_contracts'] == 0
     # FX: J7 (0.85) and 6M (0.78) both outrank BRE (0.75) and capture
     # exposure; BRE gets whatever's left, which in this case is nothing.
-    assert by_symbol['J7']['target_con'] > 0
-    assert by_symbol['6M']['target_con'] > 0
-    assert by_symbol['BRE']['target_con'] == 0
+    assert by_symbol['J7']['final_target_contracts'] > 0
+    assert by_symbol['6M']['final_target_contracts'] > 0
+    assert by_symbol['BRE']['final_target_contracts'] == 0
     # Every over-budget cluster still captured real exposure via its
     # top-priority instrument -- none are infeasible.
     assert not any(t.get('infeasible') for t in out)

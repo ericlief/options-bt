@@ -155,7 +155,7 @@ class TsmomBacktestConfig:
     vix_ma_window_days: int = DEFAULT_VIX_MA_WINDOW_DAYS
     # Correlation-aware sizing -- None (default) preserves this module's
     # original behaviour exactly: every symbol independently sized to
-    # config.max_notional * scalar / contract_notional, with NOTHING
+    # config.max_notional * scalar / one_contract_notional, with NOTHING
     # scaling the book down for holding multiple symbols at once. Confirmed
     # directly (2026-07) that this has no diversification correction of any
     # kind anywhere -- no n_effective, no sqrt(N), no correlation term --
@@ -669,8 +669,8 @@ def _compute_signal_row(symbol: str, precomputed: dict[str, pl.DataFrame], d: da
             target = direction * round(fixed_qty * vix_scalar)
     else:
         budget = notional_budget if notional_budget is not None else config.max_notional
-        contract_notional = last_close * mult
-        target = round((budget * scalar) / contract_notional) if contract_notional else 0
+        one_contract_notional = last_close * mult
+        target = round((budget * scalar) / one_contract_notional) if one_contract_notional else 0
     target = max(-config.max_contracts, min(config.max_contracts, target))
 
     return {

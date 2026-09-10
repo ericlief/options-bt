@@ -24,18 +24,18 @@ realize the requested 15% volatility.
 The cluster report shows:
 
 ```text
-standalone pos_risk       $13,958  (15.5% of equity)
-correlation-aware risk     $ 9,402  (10.4% of equity)
+standalone position dollar-vol       $13,958  (15.5% of equity)
+portfolio risk contribution          $ 9,402  (10.4% of equity)
 ```
 
-`pos_risk` is the sum of each final position's standalone dollar-vol risk,
-with direction removed. It is not portfolio volatility. `risk_contrib` is the
-Euler decomposition of the realized signed portfolio exposure through the
-correlation matrix. Its total, $9,402, is the relevant realized portfolio-risk
-figure for this report.
+`standalone_position_dollar_vol` is the sum of each final position's
+standalone dollar-vol risk, with direction removed. It is not portfolio
+volatility. `portfolio_risk_contribution` is the Euler decomposition of the
+realized signed portfolio exposure through the correlation matrix. Its total,
+$9,402, is the relevant realized portfolio-risk figure for this report.
 
 Six clusters are active: equity, energy, grain, metal, FX, and rates. In IDM
-mode, `n_effect=6` is informational; it is not used as a six-way equal budget
+mode, `n_effective_clusters=6` is informational; it is not used as a six-way equal budget
 divisor. All twelve instruments have live directional signals, but six of them
 round to zero contracts: MES, MNQ, MGC, SIL, J7, and 6M.
 
@@ -57,16 +57,17 @@ $13,500 × 2.0386 = $27,521
 For each active symbol:
 
 ```text
-symbol risk budget = $27,521 × ERC weight
-budg_const         = symbol risk budget / 0.15
-targ_not           = budg_const × combined_scalar
+allocated dollar-vol budget = $27,521 × ERC weight
+pre_scalar_notional_budget  = allocated dollar-vol budget / 0.15
+target_notional             = pre_scalar_notional_budget × combined_scalar
 ```
 
-The ERC weights sum to one. Consequently, `budg_const` is a pre-scalar
-notional budget; it is not an actual position notional and is not the shared
-`risk_budget` used by cluster mode. The blank `risk_budget` column in this IDM
-run is therefore expected, although the report would be clearer if it exposed
-the per-symbol dollar-vol budget explicitly.
+The ERC weights sum to one. Consequently, `pre_scalar_notional_budget` is a
+pre-scalar notional budget; it is not an actual position notional and is not
+the shared `cluster_dollar_vol_budget` used by cluster mode. The blank
+`cluster_dollar_vol_budget` column in this IDM run is therefore expected,
+although the report would be clearer if it exposed the per-symbol dollar-vol
+budget explicitly.
 
 The implementation performs this per-symbol budget construction in
 [`compute_symbol_notional_budget`](../src/derivatives_bt_engine/domain/allocation.py#L868),
@@ -77,7 +78,7 @@ and the live path selects it under `risk_budget_mode='idm'` in
 
 The two equity rows are:
 
-| Symbol | `budg_const` | `combined_scalar` | `targ_not` | Contract notional | Continuous contracts | Final contracts |
+| Symbol | `pre_scalar_notional_budget` | `combined_scalar` | `target_notional` | One-contract notional | Fractional contracts | Final contracts |
 |---|---:|---:|---:|---:|---:|---:|
 | MES | $12,548 | 1.0000 | $12,548 | $38,041 | 0.3299 | 0 |
 | MNQ | $12,287 | 0.7644 | $9,392 | $58,456 | 0.1607 | 0 |
@@ -85,7 +86,7 @@ The two equity rows are:
 The conversion is:
 
 ```text
-continuous_contracts = target_notional / (close × multiplier)
+fractional_target_contracts = target_notional / (close × multiplier)
 ```
 
 The final target must be an integer. The live sizing pass rounds the
@@ -104,7 +105,8 @@ target notional to clear the rounding threshold. One MNQ would require about
 This is not caused by `max_contracts`, `max_cluster_risk_pct`, or the Goulding
 signal. `apply_cluster_cap` was omitted and defaults to false; disabling that
 cap disables cluster redistribution, but it does not permit fractional futures
-contracts. The unconditional rounding and `pos_risk` calculation are in
+contracts. The unconditional rounding and `standalone_position_dollar_vol`
+calculation are in
 [`apply_cluster_risk_cap`](../src/derivatives_bt_engine/domain/allocation.py#L192).
 
 ## What Goulding mode means here
@@ -142,11 +144,12 @@ of a continuous Goulding portfolio weight.
 ### Expected
 
 - MES/MNQ are active signals but have no affordable whole-contract target.
-- `risk_budget` is blank in IDM mode because the budget is stored as a
-  per-symbol `budg_const` instead of one shared cluster budget.
+- `cluster_dollar_vol_budget` is blank in IDM mode because the budget is
+  stored as a per-symbol `pre_scalar_notional_budget` instead of one shared
+  cluster budget.
 - `g_blend` is blank in Bull/Bear states.
-- `cur_con` is blank under `data_source='database'`; no IB account positions
-  were queried. It does not mean the real account position is zero.
+- `current_contracts` is blank under `data_source='database'`; no IB account
+  positions were queried. It does not mean the real account position is zero.
 - The cluster cap being disabled does not disable integer contract rounding.
 
 ### Design limitation
@@ -172,10 +175,10 @@ more gradual choice.
 
 1. Add explicit report fields:
 
-   - `contract_notional`
-   - `one_contract_risk`
-   - `symbol_risk_budget = budg_const × vol_target`
-   - unsigned `target_risk = abs(targ_not) × hv`
+   - `one_contract_notional`
+   - `one_contract_dollar_vol`
+   - `allocated_dollar_vol_budget = pre_scalar_notional_budget × vol_target`
+   - unsigned `fractional_target_dollar_vol = abs(target_notional) × hv`
    - `rounding_gap`
    - `scalar_capped`
    - `zero_reason` such as `below_half_contract`

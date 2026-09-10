@@ -222,10 +222,10 @@ def test_compute_rebalance_targets_database_mode_needs_no_ib(monkeypatch):
     assert len(targets) == 1
     t = targets[0]
     assert t.get('error') is None
-    # No IB connection anywhere in this mode -- cur_con is
+    # No IB connection anywhere in this mode -- current_contracts is
     # unknowable without one, reported as None rather than a misleading 0.
-    assert t['cur_con'] is None
-    assert t['target_con'] is not None
+    assert t['current_contracts'] is None
+    assert t['final_target_contracts'] is not None
 
 
 def test_sizing_diagnostics_expose_contract_hurdle_and_targets(monkeypatch):
@@ -235,15 +235,37 @@ def test_sizing_diagnostics_expose_contract_hurdle_and_targets(monkeypatch):
     config = TsmomLiveConfig(account_equity=100_000, data_source='database')
     target = compute_rebalance_targets([_instrument('X', multiplier=50.0)], config, ib=None)[0]
 
-    assert target['contract_notional'] == pytest.approx(target['close'] * target['mult'])
-    assert target['one_contract_risk'] == pytest.approx(target['contract_notional'] * target['hv'])
-    assert target['symbol_risk_budget'] == pytest.approx(target['budg_const'] * config.vol_target)
-    assert target['target_risk'] == pytest.approx(abs(target['targ_not']) * target['hv'])
-    assert target['rounding_gap'] == pytest.approx(abs(target['contin_con'] - target['target_con']))
+    assert target['one_contract_notional'] == pytest.approx(target['close'] * target['mult'])
+    assert target['one_contract_dollar_vol'] == pytest.approx(target['one_contract_notional'] * target['hv'])
+    assert target['allocated_dollar_vol_budget'] == pytest.approx(
+        target['pre_scalar_notional_budget'] * config.vol_target
+    )
+    assert target['fractional_target_dollar_vol'] == pytest.approx(
+        abs(target['target_notional']) * target['hv']
+    )
+    assert target['rounding_gap'] == pytest.approx(
+        abs(target['fractional_target_contracts'] - target['final_target_contracts'])
+    )
     assert target['scalar_capped'] in (True, False)
     assert target['portfolio_risk_target'] == pytest.approx(100_000 * config.target_portfolio_vol)
     assert target['idm_risk_target'] is None
     assert target['realized_portfolio_risk'] is None
+    assert {
+        'pre_scalar_notional_budget',
+        'uncapped_target_notional',
+        'target_notional',
+        'one_contract_notional',
+        'one_contract_dollar_vol',
+        'fractional_target_dollar_vol',
+        'fractional_target_contracts',
+        'final_target_contracts',
+        'standalone_position_dollar_vol',
+    } <= target.keys()
+    assert not {
+        'budg_const', 'raw_not', 'targ_not', 'contract_notional',
+        'one_contract_risk', 'target_risk', 'contin_con', 'target_con',
+        'pos_risk',
+    } & target.keys()
 
 
 def test_compute_rebalance_targets_database_mode_respects_as_of(monkeypatch):
@@ -304,7 +326,7 @@ def test_risk_budget_mode_cluster_gives_every_active_instrument_the_same_budget(
     config = TsmomLiveConfig(account_equity=1_000_000, data_source='database', risk_budget_mode='cluster')
     targets = compute_rebalance_targets([_instrument('X'), _instrument('Y')], config, ib=None)
 
-    budgets = {t['symbol']: t['budg_const'] for t in targets if t.get('error') is None}
+    budgets = {t['symbol']: t['pre_scalar_notional_budget'] for t in targets if t.get('error') is None}
     assert len(budgets) == 2
     assert budgets['X'] == pytest.approx(budgets['Y'])
 
@@ -334,7 +356,7 @@ def test_risk_budget_mode_idm_favors_independent_symbol_over_correlated_pair(mon
     targets = compute_rebalance_targets(
         [_instrument('A'), _instrument('B'), _instrument('C')], config, ib=None)
 
-    budgets = {t['symbol']: t['budg_const'] for t in targets if t.get('error') is None}
+    budgets = {t['symbol']: t['pre_scalar_notional_budget'] for t in targets if t.get('error') is None}
     assert set(budgets) == {'A', 'B', 'C'}
     assert budgets['C'] > budgets['A']
     assert budgets['C'] > budgets['B']
@@ -352,7 +374,7 @@ def test_risk_budget_mode_idm_use_idm_false_skips_multiplier(monkeypatch):
                               use_idm=False)
     targets = compute_rebalance_targets([_instrument('X'), _instrument('Y')], config, ib=None)
 
-    budgets = [t['budg_const'] for t in targets if t.get('error') is None]
+    budgets = [t['pre_scalar_notional_budget'] for t in targets if t.get('error') is None]
     assert len(budgets) == 2
     # No IDM adjustment, flat split -- total dollar-vol budget is exactly
     # account_equity * target_portfolio_vol, split evenly.
@@ -421,7 +443,7 @@ def test_total_risk_target_scaled_by_idm_multiplier_when_cap_enabled(monkeypatch
     assert captured['total_risk_target'] > flat_total_risk_target
 
 
-def test_risk_contribution_attached_to_targets_under_idm_mode(monkeypatch):
+def test_portfolio_risk_contribution_attached_to_targets_under_idm_mode(monkeypatch):
     same_series = _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=1)
     price_data = {
         'A': same_series, 'B': same_series,
@@ -437,24 +459,24 @@ def test_risk_contribution_attached_to_targets_under_idm_mode(monkeypatch):
     base_target = 1_000_000 * config.target_portfolio_vol
     for t in targets:
         if not t.get('error'):
-            assert 'risk_contrib' in t
+            assert 'portfolio_risk_contribution' in t
             assert t['portfolio_risk_target'] == pytest.approx(base_target)
-            assert t['idm_risk_target'] == pytest.approx(base_target * t['idm_mult'])
+            assert t['idm_risk_target'] == pytest.approx(base_target * t['idm_multiplier'])
             assert t['realized_portfolio_risk'] is not None
 
     report = tr.print_cluster_risk_report(targets)
-    assert 'risk_contrib=' in report
-    assert 'pos_risk=' in report
+    assert 'portfolio_risk_contribution=' in report
+    assert 'standalone_position_dollar_vol=' in report
     assert 'portfolio_risk_target=' in report
     assert 'idm_risk_target=' in report
     assert 'realized_portfolio_risk=' in report
 
 
-def test_risk_contribution_absent_under_cluster_mode(monkeypatch):
+def test_portfolio_risk_contribution_absent_under_cluster_mode(monkeypatch):
     # 'cluster' mode never computes H (no correlation-aware sizing at
     # all), so there's nothing for compute_realized_portfolio_risk to use
-    # -- print_cluster_risk_report should fall back to pos_risk
-    # totals only, no risk_contrib column.
+    # -- print_cluster_risk_report should fall back to standalone-position
+    # dollar-vol totals only, with no contribution column.
     price_data = {
         'X': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=1),
         'Y': _price_df(date(2018, 1, 1), 500, drift=0.0015, vol=0.005, seed=2),
@@ -465,11 +487,11 @@ def test_risk_contribution_absent_under_cluster_mode(monkeypatch):
     targets = compute_rebalance_targets([_instrument('X'), _instrument('Y')], config, ib=None)
 
     for t in targets:
-        assert 'risk_contrib' not in t
+        assert 'portfolio_risk_contribution' not in t
 
     report = tr.print_cluster_risk_report(targets)
-    assert 'pos_risk=' in report
-    assert 'risk_contrib=' not in report
+    assert 'standalone_position_dollar_vol=' in report
+    assert 'portfolio_risk_contribution=' not in report
 
 
 def test_active_field_reflects_min_conviction_and_inactive_symbol_gets_clean_zero(monkeypatch):
@@ -492,9 +514,9 @@ def test_active_field_reflects_min_conviction_and_inactive_symbol_gets_clean_zer
     for t in targets:
         assert t.get('error') is None
         assert t['active'] is False
-        assert t['target_con'] == 0
-        assert t['budg_const'] is None
-        assert t['not_weight'] is None
+        assert t['final_target_contracts'] == 0
+        assert t['pre_scalar_notional_budget'] is None
+        assert t['notional_allocation_weight'] is None
 
 
 # ── signal_weighting: 'goulding' ─────────────────────────────────────────────
@@ -951,7 +973,7 @@ def test_splice_falls_back_gracefully_on_ib_error(monkeypatch, caplog):
     # normally, and the still-live next candidate is used instead of the
     # one that errored.
     assert targets[0].get('error') is None
-    assert targets[0]['target_con'] is not None
+    assert targets[0]['final_target_contracts'] is not None
     assert any('candidate contract' in r.message and 'unavailable' in r.message for r in caplog.records)
 
 
