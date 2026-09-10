@@ -33,4 +33,5 @@
 ## Workflow
 
 - After each completed task, commit the task changes and push the commit to the configured remote.
+- Include 1–3 sentences of context in each commit message describing what changed and why.
 - Keep unrelated user changes out of task commits.
