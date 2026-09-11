@@ -14,6 +14,40 @@ portfolio risk budget
   -> realized standalone and portfolio risk
 ```
 
+## Volatility-scaling correction (2026-09-10)
+
+Goulding supplies a direction only: `+1` or `-1`.  The desired vol-parity
+size is therefore the direction times the instrument's volatility scale:
+
+```text
+risk_scalar = clamp(vol_target / hv, 0.25, 2.0)
+combined_scalar = direction * risk_scalar * intentional discounts
+```
+
+The `0.25`--`2.0` range is the low-/high-volatility leverage guardrail.  It
+must be the only volatility-scaling clamp: a second final clamp of
+`combined_scalar` to `[-1, +1]` would prevent all leverage-up for a
+full-strength Goulding signal.  For example, the historical MES row below
+had `risk_scalar=1.3035` but was limited to `combined_scalar=1.0`; the
+corrected function permits `combined_scalar=1.3035`.
+
+Without other overlays or a binding clamp, the algebra is standard equal-vol
+sizing:
+
+```text
+target_notional = (allocated_dollar_vol_budget / vol_target)
+                  * direction * (vol_target / hv)
+                = direction * allocated_dollar_vol_budget / hv
+
+abs(target_notional) * hv = allocated_dollar_vol_budget
+```
+
+IDM/ERC can intentionally give different `allocated_dollar_vol_budget`
+values to different symbols.  That is a portfolio-allocation choice; the
+`risk_scalar` still equalizes each symbol to its own assigned dollar-vol
+budget, subject to the explicit 0.25--2.0 guardrail and downstream contract,
+notional, and portfolio-risk limits.
+
 ## MES inputs from the report
 
 | Field | Value | Meaning |
@@ -23,10 +57,10 @@ portfolio risk budget
 | `idm_multiplier` | `2.0386` | IDM diversification multiplier applied to the total IDM budget. |
 | `notional_allocation_weight` | `0.0684` | MES's ERC share of the IDM-adjusted dollar-vol budget. |
 | `g_sig` / `signal` | `+1.0000` | Goulding direction; Bull means long. This is not the final position size. |
-| `risk_scalar` | `1.3035` | MES volatility-scaling component before the final scalar clamp. |
+| `risk_scalar` | `1.3035` | MES volatility scale: `clamp(vol_target / hv, 0.25, 2.0)`. |
 | `reg_discount` | `1.0000` | Goulding Bull state receives no correction/rebound discount. |
 | `vix_scalar` | `1.0000` | Portfolio-wide VX/VIX adjustment; normal regime in this run. |
-| `combined_scalar` | `1.0000` | Final sizing scalar after multiplying components and clamping to `[-1, +1]`. |
+| `combined_scalar` | `1.0000` | Historical pre-fix scalar. The final `[-1, +1]` clamp incorrectly discarded MES's permitted 1.3035× low-vol scale; after the correction it would be `1.3035`. |
 | `close` | `$7,608.25` | MES futures price used for the contract-notional calculation. |
 | `mult` | `5` | MES contract multiplier: `$5` per index point. |
 | `hv` | `0.1151` | MES annualized realized volatility used for dollar-vol conversion. |

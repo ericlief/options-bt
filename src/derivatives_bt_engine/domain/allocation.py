@@ -52,7 +52,10 @@ def compute_position_scalar(trend_strength, daily_std_last, vol_target: float,
                              annualization_days=DEFAULT_ANNUALIZATION_DAYS) -> float:
     """
     Layers 2-4 of the position sizing framework (plus the opt-in layer 5,
-    signal_confidence), combined into a single scalar in [-1, +1]:
+    signal_confidence), combined into a signed exposure scalar.  Its
+    directional component is bounded in [-1, +1], while the volatility
+    component may deliberately scale that exposure up to 2x or down to
+    0.25x:
 
         scalar = trend_strength * risk_scalar * regime_discount * signal_confidence
 
@@ -100,8 +103,15 @@ def compute_position_scalar(trend_strength, daily_std_last, vol_target: float,
 
     regime_discount = regime_discount if regime in (TrendRegime.CORRECTION, TrendRegime.REBOUND) else 1.0
 
-    scalar = trend_strength * risk_scalar * regime_discount * signal_confidence
-    return max(-1.0, min(1.0, scalar))
+    # trend_strength is a directional weight, not a leverage limit.  Both
+    # supported signal models already produce values in [-1, 1]
+    # (continuous_momentum and Goulding's binary direction), but bound this
+    # public helper's input explicitly.  Do NOT re-clamp the finished scalar
+    # to [-1, 1]: that would silently discard the permitted 1x--2x low-vol
+    # leverage from risk_scalar, especially in Goulding mode where direction
+    # is always exactly +/-1.
+    direction = max(-1.0, min(1.0, float(trend_strength)))
+    return direction * risk_scalar * regime_discount * signal_confidence
 
 
 def compute_n_effective(active_clusters: set) -> int:

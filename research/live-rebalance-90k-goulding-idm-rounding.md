@@ -128,12 +128,13 @@ Thus `g_sig` being exactly `+1` or `-1` is expected. In Bull/Bear rows,
 Correction/Rebound. The `a_co/a_re` values at or near 0/1 are pooled,
 clamped mixing estimates; they do not affect a Bull/Bear row.
 
-The final sizing scalar is also capped at `[-1, 1]`. In Goulding mode the
-direction is already ±1, so low-volatility instruments whose risk scalar is
-above one can hit this cap. That happens to MES and also contributes to
-under-utilization of their theoretical per-symbol risk budgets. It is an
-intentional exposure cap, not an arithmetic error, but it should be visible in
-the report as a separate `scalar_capped` diagnostic.
+Historically, the final sizing scalar was also capped at `[-1, 1]`. In
+Goulding mode the direction is already ±1, so that erased allowed low-vol
+leverage even when the explicit `risk_scalar` 2.0 ceiling had not bound; MES
+was the example. This was corrected on 2026-09-10: direction is bounded
+separately, while `risk_scalar`'s `[0.25, 2.0]` range remains the sole
+volatility-leverage guardrail. The `scalar_capped` diagnostic now identifies
+that real risk-scalar bound instead of the removed final cap.
 
 The code's own signal documentation describes this separation as “Goulding
 decides direction, vol-parity decides size”; it is not a literal reproduction

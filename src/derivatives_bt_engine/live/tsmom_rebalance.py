@@ -591,25 +591,21 @@ def _current_contracts(ib: IBPySync, contract) -> int:
 
 
 def _scalar_was_capped(target: dict) -> Optional[bool]:
-    """Whether the pre-VIX position scalar hit its [-1, 1] ceiling.
+    """Whether the volatility scale hit its explicit [0.25, 2.0] bound.
 
-    `compute_position_scalar` intentionally returns only the final scalar, so
-    reconstruct the uncapped product from the audit fields already attached to
-    a target.  The VIX scalar is <= 1.0, therefore it cannot create an upward
-    cap event after the position scalar has been computed.
+    The finished position scalar is intentionally not capped at +/-1: that
+    would erase permitted low-vol leverage.  `risk_scalar` is the actual
+    guardrail, reconstructed here from the audit fields so the diagnostic
+    identifies either of its bounds rather than a non-existent final cap.
     """
-    if target.get('combined_scalar') is None:
+    hv = target.get('hv')
+    vol_target = target.get('vol_target')
+    if any(v is None or (isinstance(v, float) and math.isnan(v)) for v in (hv, vol_target)):
         return None
-    components = (
-        target.get('signal'),
-        target.get('risk_scalar'),
-        target.get('reg_discount'),
-        target.get('sig_confid'),
-    )
-    if any(v is None or (isinstance(v, float) and math.isnan(v)) for v in components):
+    if float(hv) <= 0:
         return None
-    raw = math.prod(float(v) for v in components)
-    return abs(raw) > 1.0 + 1e-12
+    raw_risk_scalar = float(vol_target) / float(hv)
+    return raw_risk_scalar <= 0.25 + 1e-12 or raw_risk_scalar >= 2.0 - 1e-12
 
 
 def _attach_sizing_diagnostics(targets: list[dict], *,

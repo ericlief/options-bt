@@ -75,11 +75,17 @@ def test_position_scalar_sign_follows_trend_strength():
     assert neg < 0
 
 
-def test_position_scalar_clamped_to_unit_range():
-    # extreme trend_strength * max vol_scalar must still clamp to [-1, 1]
+def test_position_scalar_preserves_permitted_low_vol_leverage():
+    # A full-strength directional signal may use the 2x risk_scalar ceiling.
+    # The directional input is bounded separately; it must not re-clamp the
+    # finished scalar and erase allowed low-vol leverage.
     scalar = compute_position_scalar(1.0, daily_std_last=0.0001, vol_target=0.50, regime=TrendRegime.BULL)
-    assert -1.0 <= scalar <= 1.0
-    assert scalar == 1.0  # vol_scalar clamps to 2.0, but final result re-clamps
+    assert scalar == 2.0
+
+
+def test_position_scalar_bounds_direction_without_erasing_vol_scale():
+    scalar = compute_position_scalar(5.0, daily_std_last=0.0001, vol_target=0.50, regime=TrendRegime.BULL)
+    assert scalar == 2.0
 
 
 def test_position_scalar_vol_scalar_clamp_floor():
