@@ -531,14 +531,40 @@ def allocate_lot_aware_targets(
         }
         candidate_books: list[tuple[float, float, str, dict[str, int]]] = []
         for symbol in symbols:
-            if (clusters[symbol] in represented or abs(allocated_contract_counts[symbol]) >= 1
-                    or max_contracts[symbol] < 1):
+            if clusters[symbol] in represented:
+                audit(
+                    logging.DEBUG,
+                    'Lot-aware representative candidate: %s skip cluster=%s already represented',
+                    symbol, clusters[symbol],
+                )
+                continue
+            if abs(allocated_contract_counts[symbol]) >= 1:
+                audit(
+                    logging.DEBUG,
+                    'Lot-aware representative candidate: %s skip already allocated=%+d',
+                    symbol, allocated_contract_counts[symbol],
+                )
+                continue
+            if max_contracts[symbol] < 1:
+                audit(
+                    logging.DEBUG,
+                    'Lot-aware representative candidate: %s skip max_contracts=%d',
+                    symbol, max_contracts[symbol],
+                )
                 continue
             candidate_contract_counts = add_one_contract(allocated_contract_counts, symbol)
             candidate_rejection = infeasibility_reason(candidate_contract_counts)
             if candidate_rejection is None:
+                candidate_portfolio_risk = portfolio_risk(candidate_contract_counts)
+                audit(
+                    logging.DEBUG,
+                    'Lot-aware representative candidate: %s=%+d eligible cluster=%s '
+                    'one_lot_dvol=$%.0f portfolio_dvol=$%.0f',
+                    symbol, candidate_contract_counts[symbol], clusters[symbol],
+                    one_contract_dollar_vol[symbol], candidate_portfolio_risk,
+                )
                 candidate_books.append((
-                    portfolio_risk(candidate_contract_counts), one_contract_dollar_vol[symbol], symbol,
+                    candidate_portfolio_risk, one_contract_dollar_vol[symbol], symbol,
                     candidate_contract_counts,
                 ))
             else:
@@ -548,6 +574,13 @@ def allocate_lot_aware_targets(
                     symbol, candidate_contract_counts[symbol], candidate_rejection,
                 )
         if not candidate_books:
+            audit(
+                logging.DEBUG,
+                'Lot-aware representative phase complete after %d iterations: contracts=[%s] '
+                'represented_clusters=%s',
+                representative_iterations, format_contracts(allocated_contract_counts),
+                ', '.join(sorted(represented)) or 'none',
+            )
             break
         # Each candidate book is (resulting_portfolio_risk, one_contract_dollar_vol,
         # symbol, resulting_contract_counts). min compares that tuple from
