@@ -1,10 +1,10 @@
 # TSMOM Sizing Terms Cheat Sheet
 
 This cheat sheet explains the live TSMOM sizing fields using the historical
-MES row from the $90,000 Goulding/IDM/ERC report generated on 2026-09-10,
-plus the `$1,842` post-fix live example discussed below. The historical table
-values remain useful for tracing the original rounding issue; current values
-change with prices, volatility, and the corrected sizing function.
+MES row from the $90,000 Goulding/IDM/ERC report generated on 2026-09-10.
+The historical table values remain useful for tracing the original rounding
+issue; current values change with prices, volatility, and the corrected sizing
+function.
 
 The central distinction is:
 
@@ -42,12 +42,27 @@ pre_scalar_dollar_vol_budget = abs(pre_scalar_notional_budget × vol_target)
 fractional_target_dollar_vol = abs(fractional_target_notional × hv)
 ```
 
-That is why a `$12.5K` `frac_tgt_not` value is not `$12.5K` of risk: it is
-cash notional. With the run's annualized `hv` of roughly `14.74%`, for example:
+The scalar must be applied before calculating the continuous target dollar-vol:
 
 ```text
-$12,500 fractional target notional × 14.74% hv ≈ $1,842 fractional target dollar-vol
+fractional_target_notional = pre_scalar_notional_budget × combined_scalar
+fractional_target_dollar_vol = abs(fractional_target_notional × hv)
 ```
+
+For the historical MES values, the pre-scalar notional budget was `$12,548`,
+`hv` was about `11.51%`, and the correct post-fix `combined_scalar` is about
+`1.3035`:
+
+```text
+$12,548 pre_sc_not_bud × 1.3035 comb_sc ≈ $16,356 frac_tgt_not
+$16,356 frac_tgt_not × 11.51% hv ≈ $1,882 frac_tgt_dvol
+```
+
+Therefore, a current `$1,842` `frac_tgt_dvol` result comes from roughly
+`$16K` of `frac_tgt_not` at roughly `11.5%` HV (using the run's exact
+unrounded values), not from `$12.5K` times a changed HV. If `frac_tgt_not`
+really were `$12.5K` while HV remained `11.5%`, its dollar-vol would instead
+be about `$1,440`—the old final-`[-1, +1]`-clamp behavior.
 
 The two dollar-vol figures are related, but they are not aliases:
 
@@ -113,7 +128,7 @@ scalar through `combined_scalar`.
 |---|---|---|---:|
 | `one_contract_notional` | Cash notional of one MES contract at the current price | `close × mult` | `$7,608.25 × 5 = $38,041.25` |
 | `one_contract_dollar_vol` | Standalone annualized dollar-vol risk of one MES contract | `one_contract_notional × hv` | `$38,041.25 × 0.1151 ≈ $4,379` |
-| `fractional_target_dollar_vol` | Dollar-vol risk of the continuous target before integer rounding | `abs(fractional_target_notional) × hv` | `$1,842` when the continuous target notional is about `$12.5K` and `hv` is about `14.74%`. It equals `pre_scalar_dollar_vol_budget` only under pure full-strength vol parity. The original pre-fix snapshot's `$1,444` is retained only as a comparison. |
+| `fractional_target_dollar_vol` | Dollar-vol risk of the continuous target before integer rounding | `abs(fractional_target_notional) × hv` | Post-fix pure vol parity makes this equal `pre_scalar_dollar_vol_budget` (about `$1,882` in the historical MES row). The original pre-fix snapshot's `$1,444` is retained only as a comparison. |
 | `fractional_target_contracts` | Fractional desired contract count | `fractional_target_notional ÷ one_contract_notional` | `$12,548.06 ÷ $38,041.25 = 0.3299` |
 | `final_target_contracts` | Final whole-contract position target | `round(fractional_target_contracts)` in independent mode | `round(0.3299) = 0` |
 | `standalone_position_dollar_vol` | Standalone dollar-vol risk of the final integer position | `abs(final_target_contracts) × one_contract_dollar_vol` | `0 × $4,379 = $0` |
