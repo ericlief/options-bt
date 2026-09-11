@@ -512,6 +512,12 @@ def allocate_lot_aware_targets(
                 ))
         if not candidates:
             break
+        # Each candidate is (resulting_portfolio_risk, one_contract_dollar_vol,
+        # symbol, resulting_contract_counts). min compares that tuple from
+        # left to right: choose the lowest resulting portfolio risk; if tied,
+        # choose the cheaper one-lot risk; if still tied, use symbol solely as
+        # a stable deterministic tie-breaker. It never ranks symbols by any
+        # economic meaning.
         realized_risk, one_lot_risk, symbol, q = min(
             candidates, key=lambda item: (item[0], item[1], item[2])
         )
