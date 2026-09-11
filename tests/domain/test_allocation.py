@@ -753,8 +753,11 @@ def test_lot_aware_allocator_prefers_feasible_cluster_representative(caplog):
     assert any(message.startswith('Lot-aware allocation:') for message in log_messages)
     assert any('Lot-aware representative candidate: B=-1 reject portfolio_dvol=$10000 exceeds limit=$5000'
                in message for message in log_messages)
-    assert any('Lot-aware representative candidate: A=+1 eligible cluster=equity '
-               'one_lot_dvol=$4000 portfolio_dvol=$4000' in message for message in log_messages)
+    assert any(message == 'Lot-aware initial book: contracts=[flat] portfolio_dvol=$0 '
+               'continuous_distance=$2920' for message in log_messages)
+    assert any('Lot-aware representative candidate: current_contracts=[flat] -> '
+               'candidate_contracts=[A=+1] symbol=A cluster=equity one_lot_dvol=$4000 '
+               'portfolio_dvol=$0 -> $4000' in message for message in log_messages)
     assert any('Lot-aware representative phase complete after 1 iterations: contracts=[A=+1] '
                'represented_clusters=equity' in message for message in log_messages)
     assert any('Lot-aware continuous candidate: B=-1 reject portfolio_dvol=$10770 exceeds limit=$5000'

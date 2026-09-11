@@ -512,6 +512,12 @@ def allocate_lot_aware_targets(
         f'${cluster_limit:,.0f}' if cluster_limit is not None else 'off',
         ', '.join(symbols) or 'none',
     )
+    audit(
+        logging.INFO,
+        'Lot-aware initial book: contracts=[%s] portfolio_dvol=$%.0f continuous_distance=$%.0f',
+        format_contracts(allocated_contract_counts), portfolio_risk(allocated_contract_counts),
+        distance_from_continuous(allocated_contract_counts),
+    )
 
     representative_iterations = 0
     continuous_fit_iterations = 0
@@ -553,10 +559,12 @@ def allocate_lot_aware_targets(
                 candidate_portfolio_risk = portfolio_risk(candidate_contract_counts)
                 audit(
                     logging.DEBUG,
-                    'Lot-aware representative candidate: %s=%+d eligible cluster=%s '
-                    'one_lot_dvol=$%.0f portfolio_dvol=$%.0f',
-                    symbol, candidate_contract_counts[symbol], clusters[symbol],
-                    one_contract_dollar_vol[symbol], candidate_portfolio_risk,
+                    'Lot-aware representative candidate: current_contracts=[%s] -> '
+                    'candidate_contracts=[%s] symbol=%s cluster=%s one_lot_dvol=$%.0f '
+                    'portfolio_dvol=$%.0f -> $%.0f',
+                    format_contracts(allocated_contract_counts), format_contracts(candidate_contract_counts),
+                    symbol, clusters[symbol], one_contract_dollar_vol[symbol],
+                    portfolio_risk(allocated_contract_counts), candidate_portfolio_risk,
                 )
                 candidate_books.append((
                     candidate_portfolio_risk, one_contract_dollar_vol[symbol], symbol,
