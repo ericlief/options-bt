@@ -420,9 +420,10 @@ def allocate_lot_aware_targets(
     corr = None
     used_measured_correlation = False
     if H is not None and risk_symbols:
-        candidate = np.asarray(H, dtype=float)
-        if candidate.ndim == 2 and candidate.shape == (len(risk_symbols), len(risk_symbols)):
-            corr = candidate
+        candidate_correlation = np.asarray(H, dtype=float)
+        if (candidate_correlation.ndim == 2
+                and candidate_correlation.shape == (len(risk_symbols), len(risk_symbols))):
+            corr = candidate_correlation
             used_measured_correlation = True
     if corr is None:
         risk_symbols = symbols
@@ -441,7 +442,9 @@ def allocate_lot_aware_targets(
         )
         cluster_limit = effective_cap_pct * float(total_risk_target)
 
-    q = {symbol: 0 for symbol in symbols}
+    # The whole currently selected integer book: symbol -> signed contracts.
+    # It starts flat and is replaced wholesale by each selected candidate book.
+    allocated_contract_counts = {symbol: 0 for symbol in symbols}
 
     def portfolio_risk(contract_counts: dict[str, int]) -> float:
         exposure = np.zeros(len(risk_symbols), dtype=float)
@@ -478,10 +481,11 @@ def allocate_lot_aware_targets(
             for symbol in symbols
         )
 
-    def add_one(contract_counts: dict[str, int], symbol: str) -> dict[str, int]:
-        candidate = contract_counts.copy()
-        candidate[symbol] += direction[symbol]
-        return candidate
+    def add_one_contract(current_contract_counts: dict[str, int], symbol: str) -> dict[str, int]:
+        """Return a whole candidate book with one signed lot added to symbol."""
+        candidate_contract_counts = current_contract_counts.copy()
+        candidate_contract_counts[symbol] += direction[symbol]
+        return candidate_contract_counts
 
     def format_contracts(contract_counts: dict[str, int]) -> str:
         return ', '.join(
@@ -515,35 +519,38 @@ def allocate_lot_aware_targets(
     # account-level risk and cluster cap permit one.  The least-risk contract
     # wins, making the choice deterministic for a given target table.
     while True:
-        represented = {clusters[symbol] for symbol, count in q.items() if count != 0}
-        candidates: list[tuple[float, float, str, dict[str, int]]] = []
+        represented = {
+            clusters[symbol] for symbol, count in allocated_contract_counts.items() if count != 0
+        }
+        candidate_books: list[tuple[float, float, str, dict[str, int]]] = []
         for symbol in symbols:
-            if (clusters[symbol] in represented or abs(q[symbol]) >= 1
+            if (clusters[symbol] in represented or abs(allocated_contract_counts[symbol]) >= 1
                     or max_contracts[symbol] < 1):
                 continue
-            candidate = add_one(q, symbol)
-            if feasible(candidate):
-                candidates.append((
-                    portfolio_risk(candidate), one_contract_dollar_vol[symbol], symbol, candidate
+            candidate_contract_counts = add_one_contract(allocated_contract_counts, symbol)
+            if feasible(candidate_contract_counts):
+                candidate_books.append((
+                    portfolio_risk(candidate_contract_counts), one_contract_dollar_vol[symbol], symbol,
+                    candidate_contract_counts,
                 ))
-        if not candidates:
+        if not candidate_books:
             break
-        # Each candidate is (resulting_portfolio_risk, one_contract_dollar_vol,
+        # Each candidate book is (resulting_portfolio_risk, one_contract_dollar_vol,
         # symbol, resulting_contract_counts). min compares that tuple from
         # left to right: choose the lowest resulting portfolio risk; if tied,
         # choose the cheaper one-lot risk; if still tied, use symbol solely as
         # a stable deterministic tie-breaker. It never ranks symbols by any
         # economic meaning.
-        prior_risk = portfolio_risk(q)
-        realized_risk, one_lot_risk, symbol, q = min(
-            candidates, key=lambda item: (item[0], item[1], item[2])
+        prior_risk = portfolio_risk(allocated_contract_counts)
+        realized_risk, one_lot_risk, symbol, allocated_contract_counts = min(
+            candidate_books, key=lambda item: (item[0], item[1], item[2])
         )
         representative_iterations += 1
         audit(
             logging.INFO,
             'Lot-aware representative #%d/%d candidates: %s=%+d cluster=%s '
             'fractional=%+.3f one_lot_dvol=$%.0f portfolio_dvol=$%.0f -> $%.0f',
-            representative_iterations, len(candidates), symbol, q[symbol], clusters[symbol],
+            representative_iterations, len(candidate_books), symbol, allocated_contract_counts[symbol], clusters[symbol],
             direction[symbol] * continuous_contracts[symbol], one_lot_risk, prior_risk, realized_risk,
         )
 
@@ -552,38 +559,41 @@ def allocate_lot_aware_targets(
     # lets a one-contract representative continue to two when the continuous
     # target actually calls for two.
     while True:
-        current_distance = distance_from_continuous(q)
-        current_risk = portfolio_risk(q)
-        candidates = []
+        current_distance = distance_from_continuous(allocated_contract_counts)
+        current_risk = portfolio_risk(allocated_contract_counts)
+        candidate_books = []
         for symbol in symbols:
             desired_ceiling = min(max_contracts[symbol], math.ceil(continuous_contracts[symbol]))
-            if desired_ceiling <= 0 or abs(q[symbol]) >= desired_ceiling:
+            if desired_ceiling <= 0 or abs(allocated_contract_counts[symbol]) >= desired_ceiling:
                 continue
-            candidate = add_one(q, symbol)
-            if not feasible(candidate):
+            candidate_contract_counts = add_one_contract(allocated_contract_counts, symbol)
+            if not feasible(candidate_contract_counts):
                 continue
-            new_distance = distance_from_continuous(candidate)
+            new_distance = distance_from_continuous(candidate_contract_counts)
             if new_distance < current_distance - 1e-9:
-                candidates.append((new_distance, portfolio_risk(candidate), symbol, candidate))
-        if not candidates:
+                candidate_books.append((
+                    new_distance, portfolio_risk(candidate_contract_counts), symbol,
+                    candidate_contract_counts,
+                ))
+        if not candidate_books:
             audit(
                 logging.DEBUG,
                 'Lot-aware continuous fit complete after %d iterations: contracts=[%s] '
                 'distance=$%.0f portfolio_dvol=$%.0f',
-                continuous_fit_iterations, format_contracts(q), current_distance, current_risk,
+                continuous_fit_iterations, format_contracts(allocated_contract_counts), current_distance, current_risk,
             )
             break
-        prior_contracts = format_contracts(q)
-        new_distance, realized_risk, symbol, q = min(
-            candidates, key=lambda item: (item[0], item[1], item[2])
+        prior_contracts = format_contracts(allocated_contract_counts)
+        new_distance, realized_risk, symbol, allocated_contract_counts = min(
+            candidate_books, key=lambda item: (item[0], item[1], item[2])
         )
         continuous_fit_iterations += 1
         audit(
             logging.DEBUG,
             'Lot-aware continuous fit #%d/%d candidates: contracts=[%s] -> %s=%+d '
             'fractional=%+.3f distance=$%.0f -> $%.0f portfolio_dvol=$%.0f -> $%.0f',
-            continuous_fit_iterations, len(candidates), prior_contracts,
-            symbol, q[symbol], direction[symbol] * continuous_contracts[symbol],
+            continuous_fit_iterations, len(candidate_books), prior_contracts,
+            symbol, allocated_contract_counts[symbol], direction[symbol] * continuous_contracts[symbol],
             current_distance, new_distance, current_risk, realized_risk,
         )
 
@@ -594,35 +604,38 @@ def allocate_lot_aware_targets(
     # integer over-allocation.
     if portfolio_risk_target is not None and portfolio_risk_target > 0:
         while True:
-            current_risk = portfolio_risk(q)
+            current_risk = portfolio_risk(allocated_contract_counts)
             current_gap = abs(float(portfolio_risk_target) - current_risk)
-            current_distance = distance_from_continuous(q)
-            candidates = []
+            current_distance = distance_from_continuous(allocated_contract_counts)
+            candidate_books = []
             for symbol in symbols:
                 desired_ceiling = min(
                     max_contracts[symbol],
                     max(1, math.ceil(continuous_contracts[symbol]) + 1),
                 )
-                if desired_ceiling <= 0 or abs(q[symbol]) >= desired_ceiling:
+                if desired_ceiling <= 0 or abs(allocated_contract_counts[symbol]) >= desired_ceiling:
                     continue
-                candidate = add_one(q, symbol)
-                if not feasible(candidate):
+                candidate_contract_counts = add_one_contract(allocated_contract_counts, symbol)
+                if not feasible(candidate_contract_counts):
                     continue
-                new_gap = abs(float(portfolio_risk_target) - portfolio_risk(candidate))
+                new_gap = abs(float(portfolio_risk_target) - portfolio_risk(candidate_contract_counts))
                 if new_gap < current_gap - 1e-9:
-                    candidates.append((new_gap, distance_from_continuous(candidate), symbol, candidate))
-            if not candidates:
+                    candidate_books.append((
+                        new_gap, distance_from_continuous(candidate_contract_counts), symbol,
+                        candidate_contract_counts,
+                    ))
+            if not candidate_books:
                 audit(
                     logging.DEBUG,
                     'Lot-aware utilization complete after %d iterations: contracts=[%s] '
                     'target_gap=$%.0f continuous_gap=$%.0f portfolio_dvol=$%.0f',
-                    utilization_iterations, format_contracts(q), current_gap,
+                    utilization_iterations, format_contracts(allocated_contract_counts), current_gap,
                     current_distance, current_risk,
                 )
                 break
-            prior_contracts = format_contracts(q)
-            new_gap, new_distance, symbol, q = min(
-                candidates, key=lambda item: (item[0], item[1], item[2])
+            prior_contracts = format_contracts(allocated_contract_counts)
+            new_gap, new_distance, symbol, allocated_contract_counts = min(
+                candidate_books, key=lambda item: (item[0], item[1], item[2])
             )
             utilization_iterations += 1
             audit(
@@ -630,10 +643,10 @@ def allocate_lot_aware_targets(
                 'Lot-aware utilization #%d/%d candidates: contracts=[%s] -> %s=%+d '
                 'fractional=%+.3f target_gap=$%.0f -> $%.0f continuous_gap=$%.0f -> $%.0f '
                 'portfolio_dvol=$%.0f -> $%.0f',
-                utilization_iterations, len(candidates), prior_contracts,
-                symbol, q[symbol], direction[symbol] * continuous_contracts[symbol],
+                utilization_iterations, len(candidate_books), prior_contracts,
+                symbol, allocated_contract_counts[symbol], direction[symbol] * continuous_contracts[symbol],
                 current_gap, new_gap, current_distance, new_distance,
-                current_risk, portfolio_risk(q),
+                current_risk, portfolio_risk(allocated_contract_counts),
             )
 
     # Finalize every valid row, including zeroed rows, from the same integer
@@ -642,25 +655,27 @@ def allocate_lot_aware_targets(
     # below-half rounding case.
     for target in valid:
         symbol = target['symbol']
-        count = q.get(symbol, 0)
+        count = allocated_contract_counts.get(symbol, 0)
         target['final_target_contracts'] = count
         target['standalone_position_dollar_vol'] = abs(count) * one_contract_dollar_vol.get(symbol, 0.0)
 
-        if (symbol in q and count == 0
+        if (symbol in allocated_contract_counts and count == 0
                 and abs(float(target['fractional_target_contracts'])) > 1e-12):
-            one_lot = add_one(q, symbol)
-            if portfolio_limit is not None and portfolio_risk(one_lot) > portfolio_limit + 1e-9:
+            one_lot_candidate_book = add_one_contract(allocated_contract_counts, symbol)
+            if (portfolio_limit is not None
+                    and portfolio_risk(one_lot_candidate_book) > portfolio_limit + 1e-9):
                 target['integer_zero_reason'] = 'integer_risk_limit'
             elif cluster_limit is not None and any(
                     risk > cluster_limit + 1e-9
-                    for risk in cluster_risks(one_lot).values()):
+                    for risk in cluster_risks(one_lot_candidate_book).values()):
                 target['integer_zero_reason'] = 'cluster_risk_limit'
 
     audit(
         logging.INFO,
         'Lot-aware final: contracts=[%s] realized_portfolio_dvol=$%.0f '
         'target=$%.0f limit=%s iterations=(representatives=%d, fit=%d, utilization=%d)',
-        format_contracts(q), portfolio_risk(q), portfolio_risk_target or 0.0,
+        format_contracts(allocated_contract_counts), portfolio_risk(allocated_contract_counts),
+        portfolio_risk_target or 0.0,
         f'${portfolio_limit:,.0f}' if portfolio_limit is not None else 'unbounded',
         representative_iterations, continuous_fit_iterations, utilization_iterations,
     )
