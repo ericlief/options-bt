@@ -112,8 +112,8 @@ notional, and portfolio-risk limits.
 | `idm_risk_target` | IDM-adjusted total dollar-vol budget before ERC splitting | `portfolio_risk_target × idm_multiplier` | `$13,500 × 2.0386 ≈ $27,521` |
 | `pre_scalar_notional_budget` | MES's notional budget before applying the signal/volatility scalar | `(idm_risk_target × notional_allocation_weight) ÷ vol_target` | `($27,521 × 0.0684) ÷ 0.15 ≈ $12,548` |
 | `pre_scalar_dollar_vol_budget` | MES's dollar-vol budget before the signal/volatility scalar | `pre_scalar_notional_budget × vol_target` | `$12,548.06 × 0.15 ≈ $1,882` |
-| `uncapped_fractional_target_notional` | Uncapped continuous dollar exposure after applying the final scalar | `pre_scalar_notional_budget × combined_scalar` | `$12,548.06 × 1.00 = $12,548` |
-| `fractional_target_notional` | Continuous dollar exposure after any optional `max_notional` ceiling | `clamp(uncapped_fractional_target_notional, -max_notional, +max_notional)` | `$12,548` because no ceiling reduced it |
+| `uncapped_fractional_target_notional` | Uncapped continuous dollar exposure after applying the final scalar | `pre_scalar_notional_budget × combined_scalar` | Post-fix historical MES: `$12,548.06 × 1.3035 ≈ $16,356` |
+| `fractional_target_notional` | Continuous dollar exposure after any optional `max_notional` ceiling | `clamp(uncapped_fractional_target_notional, -max_notional, +max_notional)` | `$16,356` because no ceiling reduced it |
 
 Important: `uncapped_fractional_target_notional` and
 `fractional_target_notional` are continuous desired portfolio exposure
@@ -129,24 +129,25 @@ scalar through `combined_scalar`.
 | `one_contract_notional` | Cash notional of one MES contract at the current price | `close × mult` | `$7,608.25 × 5 = $38,041.25` |
 | `one_contract_dollar_vol` | Standalone annualized dollar-vol risk of one MES contract | `one_contract_notional × hv` | `$38,041.25 × 0.1151 ≈ $4,379` |
 | `fractional_target_dollar_vol` | Dollar-vol risk of the continuous target before integer rounding | `abs(fractional_target_notional) × hv` | Post-fix historical MES: `$16,356 × 0.1151 ≈ $1,882`, equal to `pre_scalar_dollar_vol_budget`. The original pre-fix snapshot's `$1,444` used the incorrectly clamped `$12,548` notional. |
-| `fractional_target_contracts` | Fractional desired contract count | `fractional_target_notional ÷ one_contract_notional` | `$12,548.06 ÷ $38,041.25 = 0.3299` |
-| `final_target_contracts` | Final whole-contract position target | `round(fractional_target_contracts)` in independent mode | `round(0.3299) = 0` |
+| `fractional_target_contracts` | Fractional desired contract count | `fractional_target_notional ÷ one_contract_notional` | Post-fix historical MES: `$16,356 ÷ $38,041.25 ≈ 0.4300` |
+| `final_target_contracts` | Final whole-contract position target | `round(fractional_target_contracts)` in independent mode | `round(0.4300) = 0` |
 | `standalone_position_dollar_vol` | Standalone dollar-vol risk of the final integer position | `abs(final_target_contracts) × one_contract_dollar_vol` | `0 × $4,379 = $0` |
 | `portfolio_risk_contribution` | MES's correlation-aware Euler contribution to realized portfolio risk | Derived from signed exposure vector `x` and correlation matrix `H` | `$0` because MES has zero contracts |
-| `rounding_gap` | Distance between fractional and final contract targets | `abs(fractional_target_contracts - final_target_contracts)` | `abs(0.3299 - 0) = 0.3299 contracts` |
+| `rounding_gap` | Distance between fractional and final contract targets | `abs(fractional_target_contracts - final_target_contracts)` | `abs(0.4300 - 0) = 0.4300 contracts` |
 
 ## Why MES becomes zero
 
-MES's desired exposure is `$12,548`, but one MES contract represents
+After the sizing correction, MES's desired exposure is about `$16,356`, but one MES contract represents
 approximately `$38,041` of futures notional:
 
 ```text
-fractional target = $12,548 / $38,041 = 0.3299 contracts
+fractional target = $16,356 / $38,041 ≈ 0.4300 contracts
 final target      = 0 contracts
 ```
 
 The one-contract risk hurdle is approximately `$4,379`, while the continuous
-target's dollar-vol is only `$1,842` in the current example. The legacy
+target's dollar-vol is about `$1,882` for the post-fix historical example.
+The legacy
 independent allocator cannot trade a sub-half-contract target, so it rounds to
 zero and reports `zero_reason=below_half_contract`.
 
@@ -159,7 +160,7 @@ can clear its one-contract hurdle.
 ## One-line interpretation of the MES row
 
 > Goulding wants to be long MES, and the volatility model assigns MES about
-> `$12.5K` of desired futures exposure, but that is only `0.3299` MES
+> `$16.4K` of desired futures exposure, but that is only `0.4300` MES
 > contracts; one contract is about `$38.0K` notional and `$4.4K` annualized
 > dollar-vol risk, so the trade rounds to zero.
 
