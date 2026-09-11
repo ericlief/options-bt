@@ -49,10 +49,15 @@ from derivatives_bt_engine.live.tsmom_rebalance import (
     _resolve_contract,
 )
 from derivatives_bt_engine.domain.allocation import NOTIONAL_WEIGHTING_SCHEMES
+from derivatives_bt_engine.utils.logger import setup_logger
 
 load_dotenv()
 
-log = logging.getLogger(__name__)
+# This file is also supported through ``python -m``. In that form its module
+# name becomes ``__main__``, which is outside the package logger hierarchy;
+# use the canonical package name so the shared file handler receives it either
+# way.
+log = logging.getLogger('derivatives_bt_engine.live.run_tsmom_rebalance')
 
 DEFAULT_MAX_NOTIONAL = float(os.getenv('TSMOM_DEFAULT_MAX_NOTIONAL', '0')) or None
 
@@ -138,22 +143,15 @@ def _csv_label(key: str) -> str:
     return _CSV_COLUMN_LABEL.get(key, key)
 
 
-def configure_logging():
-    fmt = logging.Formatter('%(asctime)s %(name)s [%(levelname)s] %(message)s')
-    level = os.getenv('LOG_LEVEL', 'INFO').upper()
-
-    root = logging.getLogger()
-    if root.handlers:
-        return
-    root.setLevel(logging.WARNING)
-
-    for name in ('__main__', 'derivatives_bt_engine'):
-        logging.getLogger(name).setLevel(level)
-    logging.getLogger('ib_insync').setLevel(logging.WARNING)
-
-    sh = logging.StreamHandler(sys.stdout)
-    sh.setFormatter(fmt)
-    root.addHandler(sh)
+def configure_logging() -> str:
+    """Use the package-wide file handler shared by live and backtest modules."""
+    package_logger = setup_logger()
+    log_path = next(
+        (handler.baseFilename for handler in package_logger.handlers
+         if handler.get_name() == 'derivatives_bt_engine_file'),
+        None,
+    )
+    return log_path or 'unavailable'
 
 
 def connect_with_retry(ib: IBPySync, host, ports, client_id, interval=30):
@@ -497,7 +495,8 @@ def main():
         sys.exit(f"--live requires --data-source ib (real orders need a live account) — got "
                  f"--data-source {args.data_source!r}")
 
-    configure_logging()
+    log_path = configure_logging()
+    print(f'Logging to {log_path}')
 
     instruments = _build_instruments(args.instruments, args.max_notional, args.max_contracts)
     as_of = datetime.strptime(args.as_of, '%Y-%m-%d').date() if args.as_of else None

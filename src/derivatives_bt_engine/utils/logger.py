@@ -1,53 +1,61 @@
+"""One shared file logger for all derivatives-bt-engine modules.
+
+Every strategy and domain module may call :func:`setup_logger` during import.
+The returned package logger owns the sole handler, while child loggers such as
+``derivatives_bt_engine.live.tsmom_rebalance`` propagate to it. A live run and
+a backtest therefore write one coherent, run-scoped log instead of each module
+creating or bypassing an unrelated handler.
+"""
+
 import logging
-import os
 from datetime import datetime
+from pathlib import Path
+from typing import Optional
 
-def setup_logger(log_file: str = None):
+
+_PACKAGE_LOGGER_NAME = 'derivatives_bt_engine'
+_FILE_HANDLER_NAME = 'derivatives_bt_engine_file'
+
+
+def _default_log_path() -> Path:
+    """Return a project-root log path, independent of the caller's CWD."""
+    project_root = Path(__file__).resolve().parents[3]
+    logs_dir = project_root / 'logs'
+    logs_dir.mkdir(exist_ok=True)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    return logs_dir / f'derivatives_bt_engine_{timestamp}.log'
+
+
+def setup_logger(log_file: Optional[str] = None) -> logging.Logger:
+    """Configure and return the shared package logger.
+
+    The file handler records DEBUG and above; there is deliberately no console
+    handler. ``derivatives_bt_engine.*`` child loggers inherit this handler,
+    so options backtests, futures backtests, and the live rebalance all write
+    to the same run file. Repeated import-time calls are idempotent.
+
+    ``log_file`` remains available for callers that need a specific path. It
+    affects the first configuration in a process, preserving the former
+    function's practical first-call behavior without creating duplicate files.
     """
-    Set up logging configuration.
-    
-    Args:
-        log_file: Optional path to log file. If None, uses default name with timestamp.
-    """
-    if log_file is None:
-        # Create logs directory if it doesn't exist
-        os.makedirs('logs', exist_ok=True)
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        log_file = f'logs/backtest_{timestamp}.log'
-    
-    # Create a logger
-    logger = logging.getLogger(__name__)
-    
-    # Return existing logger if it already has handlers
-    if logger.handlers:
+    logger = logging.getLogger(_PACKAGE_LOGGER_NAME)
+    logger.setLevel(logging.DEBUG)
+    # This project installs no console handler. Keep propagation enabled so
+    # embedding applications and pytest's caplog handler can observe records;
+    # in normal CLI use the sole project-installed sink is the shared file.
+    logger.propagate = True
+
+    if any(handler.get_name() == _FILE_HANDLER_NAME for handler in logger.handlers):
         return logger
-        
-    logger.setLevel(logging.DEBUG)  # Set the logger to the lowest level
-    
-    # Create file handler for all messages, including DEBUG
-    file_handler = logging.FileHandler(log_file)
-    file_handler.setLevel(logging.DEBUG)  # Log all messages to the file
 
-    # Create console handler for INFO level only
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)  # Set to INFO level first
-    
-    # Create a filter to only allow INFO level messages (but not WARNING or ERROR)
-    class InfoFilter(logging.Filter):
-        def filter(self, record):
-            # Only allow INFO and CRITICAL levels to console (skip WARNING and ERROR)
-            return record.levelno == logging.INFO or record.levelno == logging.CRITICAL
-    
-    # Apply the filter to the console handler
-    console_handler.addFilter(InfoFilter())
-    
-    # Create a formatter and set it for both handlers
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    file_handler.setFormatter(formatter)
-    console_handler.setFormatter(formatter)
-    
-    # Add the handlers to the logger
+    path = Path(log_file) if log_file is not None else _default_log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    file_handler = logging.FileHandler(path)
+    file_handler.set_name(_FILE_HANDLER_NAME)
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter(
+        '%(asctime)s %(name)s [%(levelname)s] %(message)s'
+    ))
     logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
-    
     return logger
