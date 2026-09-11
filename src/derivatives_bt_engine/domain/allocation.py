@@ -334,7 +334,6 @@ def allocate_lot_aware_targets(
     total_risk_target: Optional[float] = None,
     n_active_clusters: int = 0,
     apply_cluster_cap: bool = False,
-    audit_lines: Optional[list[str]] = None,
 ) -> list[dict]:
     """Allocate whole contracts against the portfolio risk budget.
 
@@ -361,10 +360,8 @@ def allocate_lot_aware_targets(
     and, where a live signal cannot fit even as one lot, an
     ``integer_zero_reason`` diagnostic.
 
-    When ``audit_lines`` is supplied, append the same decision trail emitted
-    through this module's logger. This lets a CLI caller persist the complete
-    lot-allocation trace with its saved rebalance report, including DEBUG-level
-    iterations that may not be shown in the terminal's configured log level.
+    Every decision is emitted through the shared package file logger, including
+    DEBUG-level candidate evaluation and rejection reasons.
     """
     if risk_overrun_pct < 0:
         raise ValueError('risk_overrun_pct must be non-negative')
@@ -502,8 +499,6 @@ def allocate_lot_aware_targets(
         ) or 'flat'
 
     def audit(level: int, message: str, *args) -> None:
-        if audit_lines is not None:
-            audit_lines.append(f'[{logging.getLevelName(level)}] {message % args}')
         log.log(level, message, *args)
 
     audit(

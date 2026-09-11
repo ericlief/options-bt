@@ -1278,8 +1278,7 @@ def _mixing_params_for_instruments(config: TsmomLiveConfig, raw_by_symbol: dict[
 
 def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                                ib: Optional[IBPySync] = None,
-                               mixing_diagnostics: Optional[dict] = None,
-                               lot_allocation_audit: Optional[list[str]] = None) -> list[dict]:
+                               mixing_diagnostics: Optional[dict] = None) -> list[dict]:
     """
     Runs the VX spike gate first. If a spike/extreme regime is detected,
     returns early with final_target_contracts == current_contracts (held
@@ -1291,12 +1290,6 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
     estimate (C, 1/C, per-state avg_r/avg_r2, the raw pre-clamp value,
     which fallback if any). None (default, and the only option outside
     'goulding' mode, where it's never populated) skips this entirely.
-
-    `lot_allocation_audit`, when supplied, is populated only under
-    ``discrete_allocation='lot-aware'`` with the allocator's complete
-    decision trail. It is intentionally an out-parameter like
-    ``mixing_diagnostics`` so callers can persist the trace without adding
-    repeated, run-level text to every target/CSV row.
 
     Otherwise this runs in three stages:
       1. Signal for every instrument, no sizing yet -- _fetch_signal_inputs
@@ -1769,7 +1762,6 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
             total_risk_target=total_risk_target,
             n_active_clusters=n_effective,
             apply_cluster_cap=config.apply_cluster_cap,
-            audit_lines=lot_allocation_audit,
         )
     else:
         apply_cluster_risk_cap(targets, config.max_cluster_risk_pct, total_risk_target, n_effective,

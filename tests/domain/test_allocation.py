@@ -733,14 +733,12 @@ def test_lot_aware_allocator_prefers_feasible_cluster_representative(caplog):
         _target('A', 'equity', 0.33, close=100, multiplier=200, hv=0.20),  # one-lot risk = 4,000
         _target('B', 'equity', -0.16, close=100, multiplier=500, hv=0.20),  # one-lot risk = 10,000
     ]
-    audit_lines: list[str] = []
-    with caplog.at_level('INFO', logger='derivatives_bt_engine.domain.allocation'):
+    with caplog.at_level('DEBUG', logger='derivatives_bt_engine.domain.allocation'):
         out = allocate_lot_aware_targets(
             targets,
             portfolio_risk_target=5_000,
             H=np.eye(2),
             active_symbols=['A', 'B'],
-            audit_lines=audit_lines,
         )
 
     assert out[0]['final_target_contracts'] == 1
@@ -751,19 +749,20 @@ def test_lot_aware_allocator_prefers_feasible_cluster_representative(caplog):
     assert any('Lot-aware representative #1/1 candidates: A=+1' in record.message
                for record in caplog.records)
     assert any('Lot-aware final: contracts=[A=+1]' in record.message for record in caplog.records)
-    assert any(line.startswith('[INFO] Lot-aware allocation:') for line in audit_lines)
+    log_messages = [record.message for record in caplog.records]
+    assert any(message.startswith('Lot-aware allocation:') for message in log_messages)
     assert any('Lot-aware representative candidate: B=-1 reject portfolio_dvol=$10000 exceeds limit=$5000'
-               in line for line in audit_lines)
+               in message for message in log_messages)
     assert any('Lot-aware representative candidate: A=+1 eligible cluster=equity '
-               'one_lot_dvol=$4000 portfolio_dvol=$4000' in line for line in audit_lines)
+               'one_lot_dvol=$4000 portfolio_dvol=$4000' in message for message in log_messages)
     assert any('Lot-aware representative phase complete after 1 iterations: contracts=[A=+1] '
-               'represented_clusters=equity' in line for line in audit_lines)
+               'represented_clusters=equity' in message for message in log_messages)
     assert any('Lot-aware continuous candidate: B=-1 reject portfolio_dvol=$10770 exceeds limit=$5000'
-               in line for line in audit_lines)
+               in message for message in log_messages)
     assert any('Lot-aware finalize: B remains zero because one more lot would be rejected:' in line
-               for line in audit_lines)
-    assert any(line.startswith('[DEBUG] Lot-aware continuous fit complete') for line in audit_lines)
-    assert any(line.startswith('[INFO] Lot-aware final:') for line in audit_lines)
+               for line in log_messages)
+    assert any(message.startswith('Lot-aware continuous fit complete') for message in log_messages)
+    assert any(message.startswith('Lot-aware final:') for message in log_messages)
 
 
 def test_lot_aware_allocator_preserves_direction_and_hard_limit():
