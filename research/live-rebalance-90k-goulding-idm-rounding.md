@@ -178,7 +178,7 @@ more gradual choice.
 
    - `one_contract_notional`
    - `one_contract_dollar_vol`
-   - `allocated_dollar_vol_budget = pre_scalar_notional_budget × vol_target`
+   - `pre_scalar_dollar_vol_budget = pre_scalar_notional_budget × vol_target`
    - unsigned `fractional_target_dollar_vol = abs(target_notional) × hv`
    - `rounding_gap`
    - `scalar_capped`

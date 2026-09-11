@@ -639,9 +639,9 @@ def _attach_sizing_diagnostics(targets: list[dict], *,
 
         pre_scalar_notional_budget = target.get('pre_scalar_notional_budget')
         vol_target = target.get('vol_target')
-        allocated_dollar_vol_budget = None
+        pre_scalar_dollar_vol_budget = None
         if pre_scalar_notional_budget is not None and vol_target is not None:
-            allocated_dollar_vol_budget = abs(float(pre_scalar_notional_budget) * float(vol_target))
+            pre_scalar_dollar_vol_budget = abs(float(pre_scalar_notional_budget) * float(vol_target))
 
         target_notional = target.get('target_notional')
         fractional_target_dollar_vol = None
@@ -678,7 +678,7 @@ def _attach_sizing_diagnostics(targets: list[dict], *,
         target.update({
             'one_contract_notional': one_contract_notional,
             'one_contract_dollar_vol': one_contract_dollar_vol,
-            'allocated_dollar_vol_budget': allocated_dollar_vol_budget,
+            'pre_scalar_dollar_vol_budget': pre_scalar_dollar_vol_budget,
             'fractional_target_dollar_vol': fractional_target_dollar_vol,
             'rounding_gap': rounding_gap,
             'scalar_capped': _scalar_was_capped(target),
@@ -1920,7 +1920,7 @@ def print_rebalance_report(targets: list[dict]) -> str:
                if t.get('notional_allocation_weight') is not None else "")
             + (f"  idm_multiplier={_fmt(t.get('idm_multiplier'), '.3f')}"
                if t.get('idm_multiplier') is not None else "")
-            + f"  allocated_dollar_vol_budget={_fmt(t.get('allocated_dollar_vol_budget'), '.0f')}  "
+            + f"  pre_scalar_dollar_vol_budget={_fmt(t.get('pre_scalar_dollar_vol_budget'), '.0f')}  "
               f"fractional_target_dollar_vol={_fmt(t.get('fractional_target_dollar_vol'), '.0f')}  "
               f"target_notional={_fmt(t.get('target_notional'), '.0f')}  "
               f"close={_fmt(t.get('close'), '.2f'):>9}  "

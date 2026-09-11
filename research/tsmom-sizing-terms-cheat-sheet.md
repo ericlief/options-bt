@@ -35,14 +35,14 @@ Without other overlays or a binding clamp, the algebra is standard equal-vol
 sizing:
 
 ```text
-target_notional = (allocated_dollar_vol_budget / vol_target)
+target_notional = (pre_scalar_dollar_vol_budget / vol_target)
                   * direction * (vol_target / hv)
-                = direction * allocated_dollar_vol_budget / hv
+                = direction * pre_scalar_dollar_vol_budget / hv
 
-abs(target_notional) * hv = allocated_dollar_vol_budget
+abs(target_notional) * hv = pre_scalar_dollar_vol_budget
 ```
 
-IDM/ERC can intentionally give different `allocated_dollar_vol_budget`
+IDM/ERC can intentionally give different `pre_scalar_dollar_vol_budget`
 values to different symbols.  That is a portfolio-allocation choice; the
 `risk_scalar` still equalizes each symbol to its own assigned dollar-vol
 budget, subject to the explicit 0.25--2.0 guardrail and downstream contract,
@@ -72,7 +72,7 @@ notional, and portfolio-risk limits.
 | `portfolio_risk_target` | Base dollar-vol target for the entire account | `account_equity × target_portfolio_vol` | `$90,000 × 0.15 = $13,500` |
 | `idm_risk_target` | IDM-adjusted total dollar-vol budget before ERC splitting | `portfolio_risk_target × idm_multiplier` | `$13,500 × 2.0386 ≈ $27,521` |
 | `pre_scalar_notional_budget` | MES's notional budget before applying the signal/volatility scalar | `(idm_risk_target × notional_allocation_weight) ÷ vol_target` | `($27,521 × 0.0684) ÷ 0.15 ≈ $12,548` |
-| `allocated_dollar_vol_budget` | MES's pre-signal dollar-vol budget | `pre_scalar_notional_budget × vol_target` | `$12,548.06 × 0.15 ≈ $1,882` |
+| `pre_scalar_dollar_vol_budget` | MES's dollar-vol budget before the signal/volatility scalar | `pre_scalar_notional_budget × vol_target` | `$12,548.06 × 0.15 ≈ $1,882` |
 | `uncapped_target_notional` | Uncapped desired dollar exposure after applying the final scalar | `pre_scalar_notional_budget × combined_scalar` | `$12,548.06 × 1.00 = $12,548` |
 | `target_notional` | Desired dollar exposure after any optional `max_notional` ceiling | `clamp(uncapped_target_notional, -max_notional, +max_notional)` | `$12,548` because no ceiling reduced it |
 

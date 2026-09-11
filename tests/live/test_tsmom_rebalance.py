@@ -237,7 +237,7 @@ def test_sizing_diagnostics_expose_contract_hurdle_and_targets(monkeypatch):
 
     assert target['one_contract_notional'] == pytest.approx(target['close'] * target['mult'])
     assert target['one_contract_dollar_vol'] == pytest.approx(target['one_contract_notional'] * target['hv'])
-    assert target['allocated_dollar_vol_budget'] == pytest.approx(
+    assert target['pre_scalar_dollar_vol_budget'] == pytest.approx(
         target['pre_scalar_notional_budget'] * config.vol_target
     )
     assert target['fractional_target_dollar_vol'] == pytest.approx(
@@ -252,6 +252,7 @@ def test_sizing_diagnostics_expose_contract_hurdle_and_targets(monkeypatch):
     assert target['realized_portfolio_risk'] is None
     assert {
         'pre_scalar_notional_budget',
+        'pre_scalar_dollar_vol_budget',
         'uncapped_target_notional',
         'target_notional',
         'one_contract_notional',
@@ -263,7 +264,7 @@ def test_sizing_diagnostics_expose_contract_hurdle_and_targets(monkeypatch):
     } <= target.keys()
     assert not {
         'budg_const', 'raw_not', 'targ_not', 'contract_notional',
-        'one_contract_risk', 'target_risk', 'contin_con', 'target_con',
+        'one_contract_risk', 'target_risk', 'allocated_dollar_vol_budget', 'contin_con', 'target_con',
         'pos_risk',
     } & target.keys()
 
