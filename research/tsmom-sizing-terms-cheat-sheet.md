@@ -128,7 +128,7 @@ scalar through `combined_scalar`.
 |---|---|---|---:|
 | `one_contract_notional` | Cash notional of one MES contract at the current price | `close × mult` | `$7,608.25 × 5 = $38,041.25` |
 | `one_contract_dollar_vol` | Standalone annualized dollar-vol risk of one MES contract | `one_contract_notional × hv` | `$38,041.25 × 0.1151 ≈ $4,379` |
-| `fractional_target_dollar_vol` | Dollar-vol risk of the continuous target before integer rounding | `abs(fractional_target_notional) × hv` | Post-fix pure vol parity makes this equal `pre_scalar_dollar_vol_budget` (about `$1,882` in the historical MES row). The original pre-fix snapshot's `$1,444` is retained only as a comparison. |
+| `fractional_target_dollar_vol` | Dollar-vol risk of the continuous target before integer rounding | `abs(fractional_target_notional) × hv` | Post-fix historical MES: `$16,356 × 0.1151 ≈ $1,882`, equal to `pre_scalar_dollar_vol_budget`. The original pre-fix snapshot's `$1,444` used the incorrectly clamped `$12,548` notional. |
 | `fractional_target_contracts` | Fractional desired contract count | `fractional_target_notional ÷ one_contract_notional` | `$12,548.06 ÷ $38,041.25 = 0.3299` |
 | `final_target_contracts` | Final whole-contract position target | `round(fractional_target_contracts)` in independent mode | `round(0.3299) = 0` |
 | `standalone_position_dollar_vol` | Standalone dollar-vol risk of the final integer position | `abs(final_target_contracts) × one_contract_dollar_vol` | `0 × $4,379 = $0` |
