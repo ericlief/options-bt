@@ -30,6 +30,13 @@
 - Treat this repository as private.
 - Treat `.env` files and credentials as sensitive.
 
+## Logging
+
+- Use the shared `derivatives_bt_engine` file logger; do not add module-local or stdout handlers.
+- Use `DEBUG` for iterative candidate evaluation, rejection reasons, and intermediate calculations; use `INFO` for phase starts, selected decisions, and final outcomes.
+- For allocation decisions, log the current and candidate contract books, dollar-vol/risk and distance before and after, applicable limits, and the exact reason a candidate is rejected.
+- Keep log messages structured and unit-explicit (`contracts`, `notional`, `dvol`, `risk`) so saved run logs are auditable without source inspection.
+
 ## Workflow
 
 - After each completed task, commit the task changes and push the commit to the configured remote.

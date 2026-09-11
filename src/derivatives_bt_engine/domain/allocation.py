@@ -464,13 +464,20 @@ def allocate_lot_aware_targets(
             )
         return result
 
-    def feasible(contract_counts: dict[str, int]) -> bool:
-        if portfolio_limit is not None and portfolio_risk(contract_counts) > portfolio_limit + 1e-9:
-            return False
+    def infeasibility_reason(contract_counts: dict[str, int]) -> Optional[str]:
+        candidate_portfolio_risk = portfolio_risk(contract_counts)
+        if (portfolio_limit is not None
+                and candidate_portfolio_risk > portfolio_limit + 1e-9):
+            return f'portfolio_dvol=${candidate_portfolio_risk:.0f} exceeds limit=${portfolio_limit:.0f}'
         if cluster_limit is not None:
-            if any(risk > cluster_limit + 1e-9 for risk in cluster_risks(contract_counts).values()):
-                return False
-        return True
+            exceeded_clusters = [
+                f'{cluster}=${risk:.0f}'
+                for cluster, risk in cluster_risks(contract_counts).items()
+                if risk > cluster_limit + 1e-9
+            ]
+            if exceeded_clusters:
+                return f'cluster_dvol {", ".join(exceeded_clusters)} exceeds limit=${cluster_limit:.0f}'
+        return None
 
     def distance_from_continuous(contract_counts: dict[str, int]) -> float:
         return sum(
@@ -528,11 +535,18 @@ def allocate_lot_aware_targets(
                     or max_contracts[symbol] < 1):
                 continue
             candidate_contract_counts = add_one_contract(allocated_contract_counts, symbol)
-            if feasible(candidate_contract_counts):
+            candidate_rejection = infeasibility_reason(candidate_contract_counts)
+            if candidate_rejection is None:
                 candidate_books.append((
                     portfolio_risk(candidate_contract_counts), one_contract_dollar_vol[symbol], symbol,
                     candidate_contract_counts,
                 ))
+            else:
+                audit(
+                    logging.DEBUG,
+                    'Lot-aware representative candidate: %s=%+d reject %s',
+                    symbol, candidate_contract_counts[symbol], candidate_rejection,
+                )
         if not candidate_books:
             break
         # Each candidate book is (resulting_portfolio_risk, one_contract_dollar_vol,
@@ -565,16 +579,41 @@ def allocate_lot_aware_targets(
         for symbol in symbols:
             desired_ceiling = min(max_contracts[symbol], math.ceil(continuous_contracts[symbol]))
             if desired_ceiling <= 0 or abs(allocated_contract_counts[symbol]) >= desired_ceiling:
+                audit(
+                    logging.DEBUG,
+                    'Lot-aware continuous candidate: %s skip at desired ceiling=%d current=%+d',
+                    symbol, desired_ceiling, allocated_contract_counts[symbol],
+                )
                 continue
             candidate_contract_counts = add_one_contract(allocated_contract_counts, symbol)
-            if not feasible(candidate_contract_counts):
+            candidate_rejection = infeasibility_reason(candidate_contract_counts)
+            if candidate_rejection is not None:
+                audit(
+                    logging.DEBUG,
+                    'Lot-aware continuous candidate: %s=%+d reject %s',
+                    symbol, candidate_contract_counts[symbol], candidate_rejection,
+                )
                 continue
             new_distance = distance_from_continuous(candidate_contract_counts)
             if new_distance < current_distance - 1e-9:
+                audit(
+                    logging.DEBUG,
+                    'Lot-aware continuous candidate: %s=%+d eligible distance=$%.0f -> $%.0f '
+                    'portfolio_dvol=$%.0f',
+                    symbol, candidate_contract_counts[symbol], current_distance, new_distance,
+                    portfolio_risk(candidate_contract_counts),
+                )
                 candidate_books.append((
                     new_distance, portfolio_risk(candidate_contract_counts), symbol,
                     candidate_contract_counts,
                 ))
+            else:
+                audit(
+                    logging.DEBUG,
+                    'Lot-aware continuous candidate: %s=%+d reject distance=$%.0f -> $%.0f '
+                    '(not an improvement)',
+                    symbol, candidate_contract_counts[symbol], current_distance, new_distance,
+                )
         if not candidate_books:
             audit(
                 logging.DEBUG,
@@ -614,16 +653,42 @@ def allocate_lot_aware_targets(
                     max(1, math.ceil(continuous_contracts[symbol]) + 1),
                 )
                 if desired_ceiling <= 0 or abs(allocated_contract_counts[symbol]) >= desired_ceiling:
+                    audit(
+                        logging.DEBUG,
+                        'Lot-aware utilization candidate: %s skip at allowed ceiling=%d current=%+d',
+                        symbol, desired_ceiling, allocated_contract_counts[symbol],
+                    )
                     continue
                 candidate_contract_counts = add_one_contract(allocated_contract_counts, symbol)
-                if not feasible(candidate_contract_counts):
+                candidate_rejection = infeasibility_reason(candidate_contract_counts)
+                if candidate_rejection is not None:
+                    audit(
+                        logging.DEBUG,
+                        'Lot-aware utilization candidate: %s=%+d reject %s',
+                        symbol, candidate_contract_counts[symbol], candidate_rejection,
+                    )
                     continue
-                new_gap = abs(float(portfolio_risk_target) - portfolio_risk(candidate_contract_counts))
+                candidate_portfolio_risk = portfolio_risk(candidate_contract_counts)
+                new_gap = abs(float(portfolio_risk_target) - candidate_portfolio_risk)
                 if new_gap < current_gap - 1e-9:
+                    audit(
+                        logging.DEBUG,
+                        'Lot-aware utilization candidate: %s=%+d eligible target_gap=$%.0f -> $%.0f '
+                        'continuous_gap=$%.0f portfolio_dvol=$%.0f',
+                        symbol, candidate_contract_counts[symbol], current_gap, new_gap,
+                        distance_from_continuous(candidate_contract_counts), candidate_portfolio_risk,
+                    )
                     candidate_books.append((
                         new_gap, distance_from_continuous(candidate_contract_counts), symbol,
                         candidate_contract_counts,
                     ))
+                else:
+                    audit(
+                        logging.DEBUG,
+                        'Lot-aware utilization candidate: %s=%+d reject target_gap=$%.0f -> $%.0f '
+                        '(not closer to target)',
+                        symbol, candidate_contract_counts[symbol], current_gap, new_gap,
+                    )
             if not candidate_books:
                 audit(
                     logging.DEBUG,
@@ -658,17 +723,27 @@ def allocate_lot_aware_targets(
         count = allocated_contract_counts.get(symbol, 0)
         target['final_target_contracts'] = count
         target['standalone_position_dollar_vol'] = abs(count) * one_contract_dollar_vol.get(symbol, 0.0)
+        audit(
+            logging.DEBUG,
+            'Lot-aware finalize: %s fractional=%+.3f final=%+d standalone_dvol=$%.0f',
+            symbol, float(target['fractional_target_contracts']), count,
+            target['standalone_position_dollar_vol'],
+        )
 
         if (symbol in allocated_contract_counts and count == 0
                 and abs(float(target['fractional_target_contracts'])) > 1e-12):
             one_lot_candidate_book = add_one_contract(allocated_contract_counts, symbol)
-            if (portfolio_limit is not None
-                    and portfolio_risk(one_lot_candidate_book) > portfolio_limit + 1e-9):
+            one_lot_rejection = infeasibility_reason(one_lot_candidate_book)
+            if one_lot_rejection and one_lot_rejection.startswith('portfolio_dvol='):
                 target['integer_zero_reason'] = 'integer_risk_limit'
-            elif cluster_limit is not None and any(
-                    risk > cluster_limit + 1e-9
-                    for risk in cluster_risks(one_lot_candidate_book).values()):
+            elif one_lot_rejection and one_lot_rejection.startswith('cluster_dvol '):
                 target['integer_zero_reason'] = 'cluster_risk_limit'
+            if one_lot_rejection:
+                audit(
+                    logging.DEBUG,
+                    'Lot-aware finalize: %s remains zero because one more lot would be rejected: %s',
+                    symbol, one_lot_rejection,
+                )
 
     audit(
         logging.INFO,
