@@ -183,7 +183,8 @@ def _build_instruments(spec: str, max_notional: float, max_contracts: int) -> li
     return build_instruments(spec.split(','), max_notional=max_notional, max_contracts=max_contracts)
 
 
-def _save_report(cluster_report: str, targets: list[dict], mixing_diagnostics: Optional[dict] = None) -> None:
+def _save_report(cluster_report: str, targets: list[dict], mixing_diagnostics: Optional[dict] = None,
+                 lot_allocation_audit: Optional[list[str]] = None) -> None:
     """Persists each run's cluster risk report (plain text, matches stdout)
     and targets (CSV, one row per instrument) to results/ at the project
     root, timestamped -- mirrors tsmom.py's results dir so live and
@@ -198,6 +199,11 @@ def _save_report(cluster_report: str, targets: list[dict], mixing_diagnostics: O
     contribution (when present -- only under risk_budget_mode='idm', see
     compute_rebalance_targets' own docstring) already flows into the CSV
     automatically via all_keys below, no separate handling needed there.
+
+    A non-empty ``lot_allocation_audit`` is appended as a dedicated section.
+    The command's Python log is otherwise stdout-only, so this preserves the
+    complete lot-aware iterative decision trail alongside the saved cluster
+    report instead of losing it to terminal scrollback.
 
     `mixing_diagnostics` (compute_rebalance_targets' own out-param, {cluster
     or 'global': diag}, populated only under signal_weighting='goulding')
@@ -218,6 +224,12 @@ def _save_report(cluster_report: str, targets: list[dict], mixing_diagnostics: O
     txt_path = os.path.join(results_dir, f'tsmom_live_rebalance_{ts}.txt')
     with open(txt_path, 'w') as f:
         f.write(cluster_report)
+        if lot_allocation_audit:
+            f.write('\n\nLot-Aware Allocation Audit\n')
+            f.write('=' * 60)
+            f.write('\n')
+            f.write('\n'.join(lot_allocation_audit))
+            f.write('\n')
 
     if mixing_diagnostics:
         mixing_fieldnames = ['cluster', 'fallback_reason', 'a_co', 'a_re', 'a_co_raw', 'a_re_raw', 'C', 'inv_C',
@@ -553,12 +565,16 @@ def main():
         log.info('data_source=database, splice_live_price=False — no IB connection made')
 
     mixing_diagnostics: dict = {}
-    targets = compute_rebalance_targets(instruments, config, ib=ib, mixing_diagnostics=mixing_diagnostics)
+    lot_allocation_audit: list[str] = []
+    targets = compute_rebalance_targets(
+        instruments, config, ib=ib, mixing_diagnostics=mixing_diagnostics,
+        lot_allocation_audit=lot_allocation_audit,
+    )
     report = print_rebalance_report(targets)
     cluster_report = print_cluster_risk_report(targets, account_equity=args.account_equity)
 
     if not args.no_save:
-        _save_report(cluster_report, targets, mixing_diagnostics)
+        _save_report(cluster_report, targets, mixing_diagnostics, lot_allocation_audit)
 
     if not dry_run:
         send_telegram(f'TSMOM Rebalance\n{report}')

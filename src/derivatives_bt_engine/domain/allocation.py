@@ -334,6 +334,7 @@ def allocate_lot_aware_targets(
     total_risk_target: Optional[float] = None,
     n_active_clusters: int = 0,
     apply_cluster_cap: bool = False,
+    audit_lines: Optional[list[str]] = None,
 ) -> list[dict]:
     """Allocate whole contracts against the portfolio risk budget.
 
@@ -359,6 +360,11 @@ def allocate_lot_aware_targets(
     ``standalone_position_dollar_vol``,
     and, where a live signal cannot fit even as one lot, an
     ``integer_zero_reason`` diagnostic.
+
+    When ``audit_lines`` is supplied, append the same decision trail emitted
+    through this module's logger. This lets a CLI caller persist the complete
+    lot-allocation trace with its saved rebalance report, including DEBUG-level
+    iterations that may not be shown in the terminal's configured log level.
     """
     if risk_overrun_pct < 0:
         raise ValueError('risk_overrun_pct must be non-negative')
@@ -484,7 +490,13 @@ def allocate_lot_aware_targets(
             if count
         ) or 'flat'
 
-    log.info(
+    def audit(level: int, message: str, *args) -> None:
+        if audit_lines is not None:
+            audit_lines.append(f'[{logging.getLevelName(level)}] {message % args}')
+        log.log(level, message, *args)
+
+    audit(
+        logging.INFO,
         'Lot-aware allocation: target=$%.0f limit=%s overrun=%.0f%% correlation=%s '
         'cluster_cap=%s eligible=%s',
         portfolio_risk_target or 0.0,
@@ -527,7 +539,8 @@ def allocate_lot_aware_targets(
             candidates, key=lambda item: (item[0], item[1], item[2])
         )
         representative_iterations += 1
-        log.info(
+        audit(
+            logging.INFO,
             'Lot-aware representative #%d/%d candidates: %s=%+d cluster=%s '
             'fractional=%+.3f one_lot_dvol=$%.0f portfolio_dvol=$%.0f -> $%.0f',
             representative_iterations, len(candidates), symbol, q[symbol], clusters[symbol],
@@ -553,7 +566,8 @@ def allocate_lot_aware_targets(
             if new_distance < current_distance - 1e-9:
                 candidates.append((new_distance, portfolio_risk(candidate), symbol, candidate))
         if not candidates:
-            log.debug(
+            audit(
+                logging.DEBUG,
                 'Lot-aware continuous fit complete after %d iterations: contracts=[%s] '
                 'distance=$%.0f portfolio_dvol=$%.0f',
                 continuous_fit_iterations, format_contracts(q), current_distance, current_risk,
@@ -564,7 +578,8 @@ def allocate_lot_aware_targets(
             candidates, key=lambda item: (item[0], item[1], item[2])
         )
         continuous_fit_iterations += 1
-        log.debug(
+        audit(
+            logging.DEBUG,
             'Lot-aware continuous fit #%d/%d candidates: contracts=[%s] -> %s=%+d '
             'fractional=%+.3f distance=$%.0f -> $%.0f portfolio_dvol=$%.0f -> $%.0f',
             continuous_fit_iterations, len(candidates), prior_contracts,
@@ -597,7 +612,8 @@ def allocate_lot_aware_targets(
                 if new_gap < current_gap - 1e-9:
                     candidates.append((new_gap, distance_from_continuous(candidate), symbol, candidate))
             if not candidates:
-                log.debug(
+                audit(
+                    logging.DEBUG,
                     'Lot-aware utilization complete after %d iterations: contracts=[%s] '
                     'target_gap=$%.0f continuous_gap=$%.0f portfolio_dvol=$%.0f',
                     utilization_iterations, format_contracts(q), current_gap,
@@ -609,7 +625,8 @@ def allocate_lot_aware_targets(
                 candidates, key=lambda item: (item[0], item[1], item[2])
             )
             utilization_iterations += 1
-            log.debug(
+            audit(
+                logging.DEBUG,
                 'Lot-aware utilization #%d/%d candidates: contracts=[%s] -> %s=%+d '
                 'fractional=%+.3f target_gap=$%.0f -> $%.0f continuous_gap=$%.0f -> $%.0f '
                 'portfolio_dvol=$%.0f -> $%.0f',
@@ -639,7 +656,8 @@ def allocate_lot_aware_targets(
                     for risk in cluster_risks(one_lot).values()):
                 target['integer_zero_reason'] = 'cluster_risk_limit'
 
-    log.info(
+    audit(
+        logging.INFO,
         'Lot-aware final: contracts=[%s] realized_portfolio_dvol=$%.0f '
         'target=$%.0f limit=%s iterations=(representatives=%d, fit=%d, utilization=%d)',
         format_contracts(q), portfolio_risk(q), portfolio_risk_target or 0.0,

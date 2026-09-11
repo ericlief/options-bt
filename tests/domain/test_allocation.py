@@ -733,12 +733,14 @@ def test_lot_aware_allocator_prefers_feasible_cluster_representative(caplog):
         _target('A', 'equity', 0.33, close=100, multiplier=200, hv=0.20),  # one-lot risk = 4,000
         _target('B', 'equity', -0.16, close=100, multiplier=500, hv=0.20),  # one-lot risk = 10,000
     ]
+    audit_lines: list[str] = []
     with caplog.at_level('INFO', logger='derivatives_bt_engine.domain.allocation'):
         out = allocate_lot_aware_targets(
             targets,
             portfolio_risk_target=5_000,
             H=np.eye(2),
             active_symbols=['A', 'B'],
+            audit_lines=audit_lines,
         )
 
     assert out[0]['final_target_contracts'] == 1
@@ -749,6 +751,9 @@ def test_lot_aware_allocator_prefers_feasible_cluster_representative(caplog):
     assert any('Lot-aware representative #1/1 candidates: A=+1' in record.message
                for record in caplog.records)
     assert any('Lot-aware final: contracts=[A=+1]' in record.message for record in caplog.records)
+    assert any(line.startswith('[INFO] Lot-aware allocation:') for line in audit_lines)
+    assert any(line.startswith('[DEBUG] Lot-aware continuous fit complete') for line in audit_lines)
+    assert any(line.startswith('[INFO] Lot-aware final:') for line in audit_lines)
 
 
 def test_lot_aware_allocator_preserves_direction_and_hard_limit():
