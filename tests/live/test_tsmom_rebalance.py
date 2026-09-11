@@ -159,7 +159,7 @@ def test_tsmom_live_config_rejects_unknown_values(field, value):
         TsmomLiveConfig(**{field: value})
 
 
-def test_tsmom_live_config_defaults_match_prior_behavior():
+def test_tsmom_live_config_defaults_use_standard_lot_aware_policy():
     config = TsmomLiveConfig()
     assert config.signal_weighting == 'continuous'
     assert config.risk_budget_mode == 'cluster'
@@ -170,13 +170,25 @@ def test_tsmom_live_config_defaults_match_prior_behavior():
     assert config.slow_window == 252
     assert config.vol_fast_window is None
     assert config.vol_slow_window is None
-    assert config.discrete_allocation == 'independent'
+    assert config.discrete_allocation == 'lot-aware'
     assert config.discrete_risk_overrun_pct == 0.0
+    assert config.min_fractional_contracts == 0.5
 
 
 def test_tsmom_live_config_rejects_negative_discrete_risk_overrun():
     with pytest.raises(ValueError):
         TsmomLiveConfig(discrete_risk_overrun_pct=-0.01)
+
+
+def test_tsmom_live_config_rejects_cluster_cap_with_standard_lot_aware():
+    with pytest.raises(ValueError, match='incompatible'):
+        TsmomLiveConfig(discrete_allocation='lot-aware', apply_cluster_cap=True)
+
+
+@pytest.mark.parametrize('value', [0.0, -0.25, 0.51])
+def test_tsmom_live_config_rejects_bad_min_fractional_contracts(value):
+    with pytest.raises(ValueError):
+        TsmomLiveConfig(min_fractional_contracts=value)
 
 
 def test_tsmom_live_config_rejects_bad_windows():
@@ -407,7 +419,8 @@ def test_apply_cluster_cap_wiring_reaches_apply_cluster_risk_cap(monkeypatch):
     monkeypatch.setattr(tr, 'apply_cluster_risk_cap', spy)
 
     config = TsmomLiveConfig(account_equity=1_000_000, data_source='database', risk_budget_mode='idm',
-                             notional_weighting='erc', apply_cluster_cap=True)
+                             notional_weighting='erc', apply_cluster_cap=True,
+                             discrete_allocation='independent')
     compute_rebalance_targets([_instrument('X'), _instrument('Y')], config, ib=None)
 
     assert captured['apply_cap'] is True
@@ -436,7 +449,8 @@ def test_total_risk_target_scaled_by_idm_multiplier_when_cap_enabled(monkeypatch
     monkeypatch.setattr(tr, 'apply_cluster_risk_cap', spy)
 
     config = TsmomLiveConfig(account_equity=1_000_000, data_source='database', risk_budget_mode='idm',
-                             notional_weighting='erc', as_of=as_of, apply_cluster_cap=True)
+                             notional_weighting='erc', as_of=as_of, apply_cluster_cap=True,
+                             discrete_allocation='independent')
     compute_rebalance_targets([_instrument('A'), _instrument('B'), _instrument('C')], config, ib=None)
 
     flat_total_risk_target = 1_000_000 * config.target_portfolio_vol

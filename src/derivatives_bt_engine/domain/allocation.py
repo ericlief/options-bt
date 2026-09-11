@@ -330,17 +330,240 @@ def allocate_lot_aware_targets(
     risk_overrun_pct: float = 0.0,
     H: Optional[np.ndarray] = None,
     active_symbols: Optional[list[str]] = None,
+    min_fractional_contracts: float = 0.5,
+) -> list[dict]:
+    """Round continuous targets, then remove lots only to repair portfolio risk.
+
+    This is the standard correlation-aware integer policy.  It deliberately
+    has no cluster rule: IDM/ERC and ``H`` already express the intended
+    diversification.  First it applies a signed, nearest-integer round to
+    every active fractional target at or above ``min_fractional_contracts``.
+    If that complete rounded book breaches the portfolio dollar-vol limit,
+    it removes the one lot that causes the smallest continuous-target
+    tracking deterioration per dollar of risk relieved, and repeats.
+
+    It never starts flat, forces a cluster representative, or spends spare
+    risk capacity.  Thus a weak 0.16-contract signal cannot become a trade
+    merely because a cluster is otherwise absent.  The former flat,
+    representative-first research policy remains available separately as
+    :func:`allocate_flat_cluster_diversified_targets`.
+    """
+    if risk_overrun_pct < 0:
+        raise ValueError('risk_overrun_pct must be non-negative')
+    if not 0 < min_fractional_contracts <= 0.5:
+        raise ValueError('min_fractional_contracts must be in (0, 0.5]')
+
+    valid = [
+        t for t in targets
+        if not t.get('error')
+        and t.get('symbol') is not None
+        and t.get('fractional_target_contracts') is not None
+        and t.get('close') is not None
+        and t.get('mult') is not None
+        and t.get('hv') is not None
+    ]
+    if not valid:
+        return targets
+
+    symbols = [t['symbol'] for t in valid]
+    one_contract_dollar_vol = {
+        t['symbol']: abs(float(t['close']) * float(t['mult']) * float(t['hv']))
+        for t in valid
+    }
+    fractional_contracts = {
+        t['symbol']: float(t['fractional_target_contracts']) for t in valid
+    }
+    max_contracts = {
+        t['symbol']: max(0, int(t['max_contracts']))
+        if t.get('max_contracts') is not None else 10**9
+        for t in valid
+    }
+
+    # Preserve the symbol ordering associated with H.  A malformed matrix is
+    # safer as independent risk than as a late allocation exception.
+    risk_symbols = list(active_symbols or [])
+    corr = None
+    used_measured_correlation = False
+    if H is not None and risk_symbols:
+        candidate_correlation = np.asarray(H, dtype=float)
+        if (candidate_correlation.ndim == 2
+                and candidate_correlation.shape == (len(risk_symbols), len(risk_symbols))):
+            corr = candidate_correlation
+            used_measured_correlation = True
+    if corr is None:
+        risk_symbols = symbols
+        corr = np.eye(len(risk_symbols), dtype=float)
+    risk_index = {symbol: i for i, symbol in enumerate(risk_symbols)}
+
+    portfolio_limit = None
+    if portfolio_risk_target is not None and portfolio_risk_target > 0:
+        portfolio_limit = float(portfolio_risk_target) * (1.0 + risk_overrun_pct)
+
+    def portfolio_risk(contract_counts: dict[str, int]) -> float:
+        exposure = np.zeros(len(risk_symbols), dtype=float)
+        for symbol, count in contract_counts.items():
+            index = risk_index.get(symbol)
+            if index is not None:
+                exposure[index] = count * one_contract_dollar_vol[symbol]
+        variance = float(exposure @ corr @ exposure)
+        return math.sqrt(max(variance, 0.0))
+
+    def tracking_distance(contract_counts: dict[str, int]) -> float:
+        """Unsigned dollar-vol distance from the pre-integer target book."""
+        return sum(
+            abs(
+                abs(contract_counts[symbol]) * one_contract_dollar_vol[symbol]
+                - abs(fractional_contracts[symbol]) * one_contract_dollar_vol[symbol]
+            )
+            for symbol in symbols
+        )
+
+    def format_contracts(contract_counts: dict[str, int]) -> str:
+        return ', '.join(
+            f'{symbol}={count:+d}' for symbol, count in sorted(contract_counts.items()) if count
+        ) or 'flat'
+
+    # The threshold is intentionally before rounding.  With the default .50
+    # it is ordinary nearest-integer rounding; a research setting of .25
+    # deliberately promotes .25-.49 targets to one contract.
+    allocated_contract_counts: dict[str, int] = {}
+    thresholded_out: set[str] = set()
+    for target in valid:
+        symbol = target['symbol']
+        fractional = fractional_contracts[symbol]
+        magnitude = abs(fractional)
+        if target.get('active', True) is False or magnitude < min_fractional_contracts:
+            count = 0
+            if magnitude > 1e-12 and target.get('active', True) is not False:
+                thresholded_out.add(symbol)
+        else:
+            # Python's round uses bankers' ties; futures sizing needs a
+            # deterministic half-up rule so +/-0.50 is one signed contract.
+            count = (1 if fractional > 0 else -1) * max(1, math.floor(magnitude + 0.5))
+            count = (1 if count > 0 else -1) * min(abs(count), max_contracts[symbol])
+        allocated_contract_counts[symbol] = count
+        log.debug(
+            'Lot-aware initial round: %s fractional=%+.3f threshold=%.2f max=%d -> %+.0f',
+            symbol, fractional, min_fractional_contracts, max_contracts[symbol], count,
+        )
+
+    log.info(
+        'Lot-aware round-and-repair: target=$%.0f limit=%s overrun=%.0f%% correlation=%s '
+        'min_fractional_contracts=%.2f',
+        portfolio_risk_target or 0.0,
+        f'${portfolio_limit:,.0f}' if portfolio_limit is not None else 'unbounded',
+        risk_overrun_pct * 100,
+        'measured' if used_measured_correlation else 'identity fallback',
+        min_fractional_contracts,
+    )
+    log.info(
+        'Lot-aware rounded book: contracts=[%s] portfolio_dvol=$%.0f tracking_distance=$%.0f',
+        format_contracts(allocated_contract_counts), portfolio_risk(allocated_contract_counts),
+        tracking_distance(allocated_contract_counts),
+    )
+
+    repair_iterations = 0
+    removed_for_risk: set[str] = set()
+    if portfolio_limit is not None:
+        while portfolio_risk(allocated_contract_counts) > portfolio_limit + 1e-9:
+            current_risk = portfolio_risk(allocated_contract_counts)
+            current_distance = tracking_distance(allocated_contract_counts)
+            # (tracking cost per risk relief, tracking cost, -risk relief,
+            #  symbol, resulting book).  Symbol is only a deterministic tie
+            # breaker; unlike the experimental policy, signal clusters never
+            # participate in candidate construction or ordering here.
+            candidates: list[tuple[float, float, float, str, dict[str, int]]] = []
+            for symbol in symbols:
+                count = allocated_contract_counts[symbol]
+                if count == 0:
+                    continue
+                candidate_contract_counts = allocated_contract_counts.copy()
+                candidate_contract_counts[symbol] -= 1 if count > 0 else -1
+                candidate_risk = portfolio_risk(candidate_contract_counts)
+                risk_relief = current_risk - candidate_risk
+                candidate_distance = tracking_distance(candidate_contract_counts)
+                tracking_cost = candidate_distance - current_distance
+                if risk_relief <= 1e-9:
+                    log.debug(
+                        'Lot-aware repair candidate: %s=%+d -> %+d reject risk=$%.0f -> $%.0f '
+                        '(no relief; hedge removal would worsen risk)',
+                        symbol, count, candidate_contract_counts[symbol], current_risk, candidate_risk,
+                    )
+                    continue
+                cost_per_relief = tracking_cost / risk_relief
+                log.debug(
+                    'Lot-aware repair candidate: %s=%+d -> %+d risk=$%.0f -> $%.0f relief=$%.0f '
+                    'tracking_distance=$%.0f -> $%.0f cost_per_relief=%.4f',
+                    symbol, count, candidate_contract_counts[symbol], current_risk, candidate_risk,
+                    risk_relief, current_distance, candidate_distance, cost_per_relief,
+                )
+                candidates.append((
+                    cost_per_relief, tracking_cost, -risk_relief, symbol, candidate_contract_counts,
+                ))
+            if not candidates:
+                log.warning(
+                    'Lot-aware repair stopped after %d iterations: contracts=[%s] portfolio_dvol=$%.0f '
+                    'still exceeds limit=$%.0f; no one-lot removal reduces measured risk',
+                    repair_iterations, format_contracts(allocated_contract_counts), current_risk,
+                    portfolio_limit,
+                )
+                break
+            _, tracking_cost, neg_risk_relief, symbol, allocated_contract_counts = min(candidates)
+            repair_iterations += 1
+            removed_for_risk.add(symbol)
+            log.info(
+                'Lot-aware repair #%d/%d: remove %s to %+.0f; risk=$%.0f -> $%.0f '
+                'relief=$%.0f tracking_cost=$%.0f contracts=[%s]',
+                repair_iterations, len(candidates), symbol, allocated_contract_counts[symbol],
+                current_risk, portfolio_risk(allocated_contract_counts), -neg_risk_relief, tracking_cost,
+                format_contracts(allocated_contract_counts),
+            )
+
+    for target in valid:
+        symbol = target['symbol']
+        count = allocated_contract_counts[symbol]
+        target['final_target_contracts'] = count
+        target['standalone_position_dollar_vol'] = abs(count) * one_contract_dollar_vol[symbol]
+        if count == 0 and symbol in thresholded_out:
+            target['integer_zero_reason'] = 'below_min_fractional_contracts'
+        elif count == 0 and symbol in removed_for_risk:
+            target['integer_zero_reason'] = 'integer_risk_limit'
+        else:
+            target.pop('integer_zero_reason', None)
+        log.debug(
+            'Lot-aware finalize: %s fractional=%+.3f final=%+d standalone_dvol=$%.0f',
+            symbol, fractional_contracts[symbol], count, target['standalone_position_dollar_vol'],
+        )
+
+    log.info(
+        'Lot-aware final after %d repair iterations: contracts=[%s] portfolio_dvol=$%.0f '
+        'tracking_distance=$%.0f',
+        repair_iterations, format_contracts(allocated_contract_counts),
+        portfolio_risk(allocated_contract_counts), tracking_distance(allocated_contract_counts),
+    )
+    return targets
+
+
+def allocate_flat_cluster_diversified_targets(
+    targets: list[dict],
+    portfolio_risk_target: Optional[float],
+    *,
+    risk_overrun_pct: float = 0.0,
+    H: Optional[np.ndarray] = None,
+    active_symbols: Optional[list[str]] = None,
     max_cluster_risk_pct: float = 0.25,
     total_risk_target: Optional[float] = None,
     n_active_clusters: int = 0,
     apply_cluster_cap: bool = False,
 ) -> list[dict]:
-    """Allocate whole contracts against the portfolio risk budget.
+    """Experimental flat-book allocator with forced cluster representation.
 
-    This is the opt-in, deterministic discrete allocator used by live
-    rebalancing.  It starts from zero and greedily adds one contract at a
-    time, subject to the correlation-aware portfolio-risk limit and the
-    optional standalone cluster cap.  The order of decisions is deliberate:
+    This retained research policy starts from zero and greedily adds one
+    contract at a time, subject to the correlation-aware portfolio-risk limit
+    and optional standalone cluster cap.  It is intentionally *not* the
+    default ``lot-aware`` policy: it manufactures a least-risk representative
+    for every signaled cluster, including a sub-half-contract signal, before
+    it considers continuous-target fit.  The order of decisions is:
 
     * give each signaled cluster its least-risk representative when feasible;
     * add contracts that reduce the continuous dollar-risk/exposure gap;
@@ -348,11 +571,10 @@ def allocate_lot_aware_targets(
       requested portfolio target, allowing at most one contract beyond each
       continuous target.
 
-    The existing ``apply_cluster_risk_cap`` remains the default path.  This
-    function is intentionally a separate policy so that changing integer
-    sizing is explicit and independently auditable.  Correlation is used for
-    every feasibility check when ``H`` is supplied; an identity matrix is
-    used when no correlation estimate is available.
+    Select it explicitly as ``flat-cluster-diversified`` only to research
+    that diversification-first assumption. Correlation is used for every
+    feasibility check when ``H`` is supplied; an identity matrix is used when
+    no correlation estimate is available.
 
     Targets with errors or incomplete sizing inputs are left untouched.  The
     remaining valid targets are mutated with ``final_target_contracts``,
@@ -510,7 +732,7 @@ def allocate_lot_aware_targets(
 
     audit(
         logging.INFO,
-        'Lot-aware allocation: target=$%.0f limit=%s overrun=%.0f%% correlation=%s '
+        'Experimental flat-cluster allocation: target=$%.0f limit=%s overrun=%.0f%% correlation=%s '
         'cluster_cap=%s eligible=%s',
         portfolio_risk_target or 0.0,
         f'${portfolio_limit:,.0f}' if portfolio_limit is not None else 'unbounded',
@@ -790,7 +1012,7 @@ def allocate_lot_aware_targets(
 
     audit(
         logging.INFO,
-        'Lot-aware final: contracts=[%s] realized_portfolio_dvol=$%.0f '
+        'Experimental flat-cluster final: contracts=[%s] realized_portfolio_dvol=$%.0f '
         'target=$%.0f limit=%s iterations=(representatives=%d, fit=%d, utilization=%d)',
         format_contracts(allocated_contract_counts), portfolio_risk(allocated_contract_counts),
         portfolio_risk_target or 0.0,

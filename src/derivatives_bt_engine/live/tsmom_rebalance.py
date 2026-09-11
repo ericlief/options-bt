@@ -59,6 +59,7 @@ from derivatives_bt_engine.domain.allocation import (
     NOTIONAL_WEIGHTING_SCHEMES,
     _bounded_ewm_correlation_matrix,
     _coverage_restricted_idm,
+    allocate_flat_cluster_diversified_targets,
     allocate_lot_aware_targets,
     apply_cluster_risk_cap,
     build_returns_wide,
@@ -116,7 +117,7 @@ DEFAULT_MAX_CONTRACTS = 15
 SIGNAL_WEIGHTINGS = ('continuous', 'goulding')
 MIXING_POOLS = ('cluster', 'global')
 RISK_BUDGET_MODES = ('cluster', 'idm')
-DISCRETE_ALLOCATIONS = ('independent', 'lot-aware')
+DISCRETE_ALLOCATIONS = ('independent', 'lot-aware', 'flat-cluster-diversified')
 DATA_SOURCES = ('ib', 'database')
 
 # ── Infrastructure ───────────────────────────────────────────────────────
@@ -242,12 +243,18 @@ class TsmomLiveConfig:
     # silently re-imposing the assumption idm mode exists to replace.
     apply_cluster_cap: bool = False
     # Whole-contract conversion policy. 'independent' preserves the existing
-    # per-symbol rounding behavior. 'lot-aware' uses the correlation-aware
-    # portfolio-risk allocator in domain.allocation.
-    discrete_allocation: str = 'independent'
+    # per-symbol rounding behavior. 'lot-aware' rounds the complete target
+    # book then uses correlation-aware risk repair only if required; it has no
+    # cluster rule. 'flat-cluster-diversified' retains the prior experimental
+    # strategy that starts flat and forces one representative per cluster.
+    discrete_allocation: str = 'lot-aware'
     # Permitted realized portfolio-risk overrun for lot-aware sizing, as a
     # fraction of account_equity * target_portfolio_vol. Zero is a hard cap.
     discrete_risk_overrun_pct: float = 0.0
+    # Minimum absolute continuous contracts that may survive lot-aware's
+    # initial round. The default .50 is ordinary nearest-integer rounding;
+    # .25 deliberately makes .25-.49 target contracts one lot for research.
+    min_fractional_contracts: float = 0.5
     # 'ib' (default, unchanged prior behavior): live IB historical bars +
     # live VX/VIX spike gate, via IBPySync -- requires an active connection
     # (compute_rebalance_targets' own `ib` argument). 'database': the same
@@ -323,6 +330,11 @@ class TsmomLiveConfig:
                               f"got {self.discrete_allocation!r}")
         if self.discrete_risk_overrun_pct < 0:
             raise ValueError("discrete_risk_overrun_pct must be non-negative")
+        if not 0 < self.min_fractional_contracts <= 0.5:
+            raise ValueError("min_fractional_contracts must be in (0, 0.5]")
+        if self.discrete_allocation == 'lot-aware' and self.apply_cluster_cap:
+            raise ValueError("apply_cluster_cap is incompatible with lot-aware; use "
+                             "flat-cluster-diversified for the experimental cluster policy")
         if self.data_source not in DATA_SOURCES:
             raise ValueError(f"data_source must be one of {DATA_SOURCES}, got {self.data_source!r}")
         if self.fast_window <= 0 or self.slow_window <= 0:
@@ -613,7 +625,8 @@ def _attach_sizing_diagnostics(targets: list[dict], *,
                                idm_risk_target: Optional[float],
                                realized_portfolio_risk: Optional[float],
                                discrete_allocation: str = 'independent',
-                               discrete_risk_overrun_pct: float = 0.0) -> None:
+                               discrete_risk_overrun_pct: float = 0.0,
+                               min_fractional_contracts: float = 0.5) -> None:
     """Attach per-symbol and run-level sizing diagnostics to target rows.
 
     These fields are deliberately informational.  They describe the
@@ -688,9 +701,11 @@ def _attach_sizing_diagnostics(targets: list[dict], *,
             'realized_portfolio_risk': realized_portfolio_risk,
             'discrete_allocation': discrete_allocation,
             'discrete_risk_overrun_pct': discrete_risk_overrun_pct,
+            'min_fractional_contracts': min_fractional_contracts,
             'integer_risk_limit': (
                 portfolio_risk_target * (1.0 + discrete_risk_overrun_pct)
-                if discrete_allocation == 'lot-aware' and portfolio_risk_target is not None
+                if discrete_allocation in ('lot-aware', 'flat-cluster-diversified')
+                and portfolio_risk_target is not None
                 else None
             ),
         })
@@ -1317,9 +1332,12 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
          max_contracts as a sanity backstop. Whole-contract conversion and
          standalone_position_dollar_vol then use the selected
          config.discrete_allocation policy: 'independent' applies the legacy
-         per-symbol rounding via apply_cluster_risk_cap; 'lot-aware' uses a
-         portfolio-risk-constrained integer allocator and the optional
-         config.discrete_risk_overrun_pct allowance.
+         per-symbol rounding via apply_cluster_risk_cap; 'lot-aware' rounds
+         the complete target book and removes lots only when its measured
+         portfolio risk breaches the optional
+         config.discrete_risk_overrun_pct allowance. It has no cluster cap
+         or cluster-coverage rule. 'flat-cluster-diversified' retains the
+         earlier experimental flat-book, cluster-representative allocator.
          (see that function's own `apply_cap` docstring); the cluster-level
          cap/redistribution itself (rescaling any cluster whose aggregate
          dollar-vol risk exceeds max_cluster_risk_pct of total portfolio
@@ -1426,6 +1444,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
             realized_portfolio_risk=None,
             discrete_allocation=config.discrete_allocation,
             discrete_risk_overrun_pct=config.discrete_risk_overrun_pct,
+            min_fractional_contracts=config.min_fractional_contracts,
         )
         return targets
 
@@ -1758,6 +1777,15 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
             risk_overrun_pct=config.discrete_risk_overrun_pct,
             H=H,
             active_symbols=active_symbols,
+            min_fractional_contracts=config.min_fractional_contracts,
+        )
+    elif config.discrete_allocation == 'flat-cluster-diversified':
+        allocate_flat_cluster_diversified_targets(
+            targets,
+            portfolio_risk_target,
+            risk_overrun_pct=config.discrete_risk_overrun_pct,
+            H=H,
+            active_symbols=active_symbols,
             max_cluster_risk_pct=config.max_cluster_risk_pct,
             total_risk_target=total_risk_target,
             n_active_clusters=n_effective,
@@ -1810,6 +1838,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
         realized_portfolio_risk=realized_portfolio_risk,
         discrete_allocation=config.discrete_allocation,
         discrete_risk_overrun_pct=config.discrete_risk_overrun_pct,
+        min_fractional_contracts=config.min_fractional_contracts,
     )
 
     return targets
@@ -2028,6 +2057,9 @@ def print_cluster_risk_report(targets: list[dict], account_equity: Optional[floa
             f"TARGETS       portfolio_risk_target={context['portfolio_risk_target']:,.0f}"
             + (f"  discrete_allocation={context.get('discrete_allocation')}"
                if context.get('discrete_allocation') is not None else '')
+            + (f"  min_fractional_contracts={context['min_fractional_contracts']:.2f}"
+               if context.get('discrete_allocation') == 'lot-aware'
+               and context.get('min_fractional_contracts') is not None else '')
             + (f"  integer_risk_limit={context['integer_risk_limit']:,.0f}"
                if context.get('integer_risk_limit') is not None else '')
             + (f"  idm_risk_target={context['idm_risk_target']:,.0f}"

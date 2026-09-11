@@ -108,6 +108,7 @@ _CSV_COLUMN_LABEL = {
     'realized_portfolio_risk': 'real_port_risk',
     'discrete_allocation': 'disc_alloc',
     'discrete_risk_overrun_pct': 'disc_over_pct',
+    'min_fractional_contracts': 'min_frac_con',
     'integer_risk_limit': 'int_risk_lim',
     'integer_zero_reason': 'int_zero_why',
     'cluster_dollar_vol_budget': 'clust_dvol_bud',
@@ -260,7 +261,8 @@ def _save_report(cluster_report: str, targets: list[dict], mixing_diagnostics: O
                 'combined_scalar', 'idm_multiplier',
                 'account_equity', 'n_effective_clusters',
                 'portfolio_risk_target', 'idm_risk_target', 'realized_portfolio_risk',
-                'discrete_allocation', 'discrete_risk_overrun_pct', 'integer_risk_limit',
+                'discrete_allocation', 'discrete_risk_overrun_pct', 'min_fractional_contracts',
+                'integer_risk_limit',
                 'integer_zero_reason',
                 'cluster_dollar_vol_budget', 'vol_target', 'target_portfolio_vol',
                 'pre_scalar_notional_budget', 'notional_allocation_weight',
@@ -421,16 +423,22 @@ def parse_args():
                         "diversification credit -- see TsmomLiveConfig.apply_cluster_cap's own "
                         "docstring. When on with --risk-budget-mode idm, the cap's own total risk "
                         "target is scaled by the same idm_multiplier used to size positions, so it "
-                        "stays a consistency backstop rather than reversing that credit")
-    p.add_argument('--discrete-allocation', choices=DISCRETE_ALLOCATIONS, default='independent',
+                        "stays a consistency backstop rather than reversing that credit. Cannot be "
+                        "combined with standard --discrete-allocation lot-aware")
+    p.add_argument('--discrete-allocation', choices=DISCRETE_ALLOCATIONS, default='lot-aware',
                    help="Whole-contract sizing policy (default: %(default)s). 'independent' keeps "
-                        "the existing per-symbol rounding. 'lot-aware' greedily allocates integer "
-                        "lots against the correlation-aware portfolio-risk target, with cluster "
-                        "representation and optional cluster-cap constraints")
+                        "the existing per-symbol rounding. 'lot-aware' rounds all targets at the "
+                        "minimum threshold then only removes lots if measured portfolio risk exceeds "
+                        "its limit; it has no cluster rule. 'flat-cluster-diversified' is the "
+                        "experimental former flat-book policy that forces a representative per cluster")
     p.add_argument('--discrete-risk-overrun-pct', type=float, default=0.0,
-                   help="Only used with --discrete-allocation lot-aware: permitted realized "
+                   help="Only used with correlation-aware discrete policies: permitted realized "
                         "portfolio-risk overrun as a fraction of account_equity * "
                         "--target-portfolio-vol (default: %(default)s = hard cap)")
+    p.add_argument('--min-fractional-contracts', type=float, default=0.5,
+                   help="Only used with --discrete-allocation lot-aware: minimum absolute "
+                        "fractional target allowed to become an initial lot (default: %(default)s; "
+                        ".50 is ordinary nearest-integer rounding, .25 promotes .25-.49 to one lot)")
     p.add_argument('--corr-window-years', type=float, default=3.0,
                    help='Only used with --risk-budget-mode idm: bounded trailing window for the EWM '
                         'correlation estimate (default: %(default)s)')
@@ -521,6 +529,7 @@ def main():
         apply_cluster_cap=args.apply_cluster_cap,
         discrete_allocation=args.discrete_allocation,
         discrete_risk_overrun_pct=args.discrete_risk_overrun_pct,
+        min_fractional_contracts=args.min_fractional_contracts,
         corr_window_years=args.corr_window_years,
         corr_halflife_days=args.corr_halflife_days,
         data_source=args.data_source,

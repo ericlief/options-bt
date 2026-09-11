@@ -28,6 +28,7 @@ from derivatives_bt_engine.domain.allocation import (
     UNCOVERED_BUDGET_CAP_FRACTION,
     _bounded_ewm_correlation_matrix,
     _coverage_restricted_idm,
+    allocate_flat_cluster_diversified_targets,
     allocate_lot_aware_targets,
     _spinu_erc_newton,
     apply_cluster_risk_cap,
@@ -725,7 +726,7 @@ def _target(symbol, cluster, continuous_contracts, close=100.0, multiplier=10.0,
     }
 
 
-def test_lot_aware_allocator_prefers_feasible_cluster_representative(caplog):
+def test_experimental_flat_cluster_allocator_prefers_feasible_cluster_representative(caplog):
     # A's one-lot risk fits the account target while B's does not.  Both
     # belong to the same cluster, so the allocator should represent the
     # cluster with A rather than independently rounding either signal.
@@ -734,7 +735,7 @@ def test_lot_aware_allocator_prefers_feasible_cluster_representative(caplog):
         _target('B', 'equity', -0.16, close=100, multiplier=500, hv=0.20),  # one-lot risk = 10,000
     ]
     with caplog.at_level('DEBUG', logger='derivatives_bt_engine.domain.allocation'):
-        out = allocate_lot_aware_targets(
+        out = allocate_flat_cluster_diversified_targets(
             targets,
             portfolio_risk_target=5_000,
             H=np.eye(2),
@@ -745,12 +746,12 @@ def test_lot_aware_allocator_prefers_feasible_cluster_representative(caplog):
     assert out[1]['final_target_contracts'] == 0
     assert out[1]['integer_zero_reason'] == 'integer_risk_limit'
     assert out[0]['standalone_position_dollar_vol'] == pytest.approx(4_000)
-    assert any('Lot-aware allocation:' in record.message for record in caplog.records)
+    assert any('Experimental flat-cluster allocation:' in record.message for record in caplog.records)
     assert any('Lot-aware representative #1/1 candidates: A=+1' in record.message
                for record in caplog.records)
-    assert any('Lot-aware final: contracts=[A=+1]' in record.message for record in caplog.records)
+    assert any('Experimental flat-cluster final: contracts=[A=+1]' in record.message for record in caplog.records)
     log_messages = [record.message for record in caplog.records]
-    assert any(message.startswith('Lot-aware allocation:') for message in log_messages)
+    assert any(message.startswith('Experimental flat-cluster allocation:') for message in log_messages)
     assert any('Lot-aware representative candidate: B=-1 reject portfolio_dvol=$10000 exceeds limit=$5000'
                in message for message in log_messages)
     assert any(message == 'Lot-aware initial book: contracts=[flat] portfolio_dvol=$0 '
@@ -765,7 +766,7 @@ def test_lot_aware_allocator_prefers_feasible_cluster_representative(caplog):
     assert any('Lot-aware finalize: B remains zero because one more lot would be rejected:' in line
                for line in log_messages)
     assert any(message.startswith('Lot-aware continuous fit complete') for message in log_messages)
-    assert any(message.startswith('Lot-aware final:') for message in log_messages)
+    assert any(message.startswith('Experimental flat-cluster final:') for message in log_messages)
 
 
 def test_lot_aware_allocator_preserves_direction_and_hard_limit():
@@ -784,6 +785,62 @@ def test_lot_aware_allocator_preserves_direction_and_hard_limit():
     assert out[1]['final_target_contracts'] <= 0
     realized = math.sqrt(sum(t['standalone_position_dollar_vol'] ** 2 for t in out))
     assert realized <= 15 + 1e-9
+
+
+def test_lot_aware_rounds_complete_book_without_cluster_coverage():
+    # Unlike the experimental flat-cluster allocator, the standard policy
+    # does not promote a sub-half signal merely to represent its cluster.
+    targets = [
+        _target('A', 'equity', 0.33, close=100, multiplier=200, hv=0.20),
+        _target('B', 'equity', -0.16, close=100, multiplier=500, hv=0.20),
+    ]
+
+    out = allocate_lot_aware_targets(
+        targets, portfolio_risk_target=5_000, H=np.eye(2), active_symbols=['A', 'B'],
+    )
+
+    assert [target['final_target_contracts'] for target in out] == [0, 0]
+    assert [target['integer_zero_reason'] for target in out] == [
+        'below_min_fractional_contracts', 'below_min_fractional_contracts',
+    ]
+
+
+def test_lot_aware_threshold_can_deliberately_promote_quarter_contract_signal():
+    targets = [
+        _target('A', 'equity', 0.33, close=100, multiplier=200, hv=0.20),
+        _target('B', 'equity', -0.16, close=100, multiplier=500, hv=0.20),
+    ]
+
+    out = allocate_lot_aware_targets(
+        targets, portfolio_risk_target=5_000, H=np.eye(2), active_symbols=['A', 'B'],
+        min_fractional_contracts=0.25,
+    )
+
+    assert [target['final_target_contracts'] for target in out] == [1, 0]
+    assert out[1]['integer_zero_reason'] == 'below_min_fractional_contracts'
+
+
+def test_lot_aware_repairs_over_limit_book_without_using_spare_capacity(caplog):
+    # Start from the normal rounded book (two lots); then remove exactly one
+    # only because its identity-matrix risk exceeds the hard $12 limit.
+    targets = [
+        _target('A', 'equity', 1.2, close=10, multiplier=1, hv=1),
+        _target('B', 'grain', 1.2, close=10, multiplier=1, hv=1),
+        # This sub-half signal has ample spare capacity after repair, but must
+        # remain zero because standard lot-aware never fills unused risk.
+        _target('C', 'metal', 0.43, close=10, multiplier=1, hv=1),
+    ]
+    with caplog.at_level('DEBUG', logger='derivatives_bt_engine.domain.allocation'):
+        out = allocate_lot_aware_targets(
+            targets, portfolio_risk_target=12, H=np.eye(3), active_symbols=['A', 'B', 'C'],
+        )
+
+    assert sum(abs(target['final_target_contracts']) for target in out[:2]) == 1
+    assert out[2]['final_target_contracts'] == 0
+    assert out[2]['integer_zero_reason'] == 'below_min_fractional_contracts'
+    assert any('Lot-aware repair #1/2:' in record.message for record in caplog.records)
+    assert any('Lot-aware final after 1 repair iterations:' in record.message
+               for record in caplog.records)
 
 
 @pytest.mark.parametrize('n_active_clusters,expected_pct', [

@@ -220,34 +220,51 @@ the base portfolio risk target, IDM-adjusted target, and realized post-rounding
 portfolio risk in both the CSV rows and the text report. These fields are
 diagnostic only and do not change position sizing.
 
-No conclusion in this note requires changing the current sizing code. The
-current MES/MNQ result is internally consistent; the improvements are about
-making the discrete-risk consequence explicit and deciding whether live
-sizing should optimize for broader representation or closer realized-vol
-tracking.
+The original MES/MNQ result was internally consistent, but its small-account
+rounding trade-off motivated the standard lot-aware policy below: preserve
+the complete rounded signal book, then repair only an actual portfolio-risk
+breach rather than manufacturing broader cluster representation.
 
 ## v1.0 implementation of improvement 3
 
-The opt-in lot-aware policy is now implemented behind:
+The standard opt-in lot-aware policy is now implemented behind:
 
 ```text
 --discrete-allocation lot-aware
 --discrete-risk-overrun-pct 0.00
+--min-fractional-contracts 0.50
 ```
 
-The default remains `--discrete-allocation independent`, which preserves the
-prior per-symbol whole-contract rounding. In lot-aware mode, the allocator
-uses each symbol's one-contract dollar-vol risk, the IDM correlation matrix
-when available (identity otherwise), the account-level target
-`account_equity × target_portfolio_vol`, and the optional standalone cluster
-cap. It greedily chooses feasible cluster representatives, fits continuous
-targets, and uses spare risk capacity to move realized risk toward the target
-while allowing at most one lot beyond a symbol's continuous ceiling.
+Standard lot-aware is the default `--discrete-allocation` policy. The legacy
+per-symbol rounding remains available as `--discrete-allocation independent`.
+Standard lot-aware first applies the threshold and nearest-integer rounding to
+the complete active target book. With the default `0.50` threshold this is
+normal round-half-up sizing;
+`0.25` is an explicit research choice that promotes a 0.25--0.49 target to
+one lot. It then uses each symbol's one-contract dollar-vol risk and the IDM
+correlation matrix when available (identity otherwise) only to remove lots
+if the rounded book exceeds `account_equity × target_portfolio_vol` plus the
+chosen overrun. It neither forces cluster representation nor spends unused
+risk capacity, so a weak signal does not become a trade purely for
+diversification. `--apply-cluster-cap` is deliberately incompatible with
+this policy.
+
+The earlier start-from-flat algorithm is retained for comparison under:
+
+```text
+--discrete-allocation flat-cluster-diversified
+```
+
+That experimental policy first selects the least-risk feasible representative
+from every signaled cluster, then fits continuous targets and may spend spare
+risk capacity. It is useful for researching diversification-first small
+accounts, but it can promote a sub-half-contract signal and is not the
+standard lot-aware behavior.
 
 The account risk limit is hard by default and can be relaxed explicitly with
 `--discrete-risk-overrun-pct`. A symbol that has a live signal but cannot fit
-one lot is retained at zero with `zero_reason=integer_risk_limit` or
-`cluster_risk_limit`; ordinary sub-half-contract rounding remains
-`below_half_contract`. The chosen policy and integer risk limit are included
-in the CSV and cluster report so a lot-aware run is distinguishable from the
-legacy path.
+one lot after risk repair is retained at zero with
+`zero_reason=integer_risk_limit`; a signal below the configured threshold is
+`below_min_fractional_contracts`. The chosen policy, threshold, and integer
+risk limit are included in the CSV and cluster report so a lot-aware run is
+distinguishable from the legacy and experimental paths.
