@@ -59,7 +59,7 @@ For each active symbol:
 ```text
 allocated dollar-vol budget = $27,521 × ERC weight
 pre_scalar_notional_budget  = allocated dollar-vol budget / 0.15
-target_notional             = pre_scalar_notional_budget × combined_scalar
+fractional_target_notional  = pre_scalar_notional_budget × combined_scalar
 ```
 
 The ERC weights sum to one. Consequently, `pre_scalar_notional_budget` is a
@@ -78,7 +78,7 @@ and the live path selects it under `risk_budget_mode='idm'` in
 
 The two equity rows are:
 
-| Symbol | `pre_scalar_notional_budget` | `combined_scalar` | `target_notional` | One-contract notional | Fractional contracts | Final contracts |
+| Symbol | `pre_scalar_notional_budget` | `combined_scalar` | `fractional_target_notional` | One-contract notional | Fractional contracts | Final contracts |
 |---|---:|---:|---:|---:|---:|---:|
 | MES | $12,548 | 1.0000 | $12,548 | $38,041 | 0.3299 | 0 |
 | MNQ | $12,287 | 0.7644 | $9,392 | $58,456 | 0.1607 | 0 |
@@ -86,7 +86,7 @@ The two equity rows are:
 The conversion is:
 
 ```text
-fractional_target_contracts = target_notional / (close × multiplier)
+fractional_target_contracts = fractional_target_notional / (close × multiplier)
 ```
 
 The final target must be an integer. The live sizing pass rounds the
@@ -179,7 +179,7 @@ more gradual choice.
    - `one_contract_notional`
    - `one_contract_dollar_vol`
    - `pre_scalar_dollar_vol_budget = pre_scalar_notional_budget × vol_target`
-   - unsigned `fractional_target_dollar_vol = abs(target_notional) × hv`
+   - unsigned `fractional_target_dollar_vol = abs(fractional_target_notional) × hv`
    - `rounding_gap`
    - `scalar_capped`
    - `zero_reason` such as `below_half_contract`

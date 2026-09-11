@@ -241,7 +241,7 @@ def test_sizing_diagnostics_expose_contract_hurdle_and_targets(monkeypatch):
         target['pre_scalar_notional_budget'] * config.vol_target
     )
     assert target['fractional_target_dollar_vol'] == pytest.approx(
-        abs(target['target_notional']) * target['hv']
+        abs(target['fractional_target_notional']) * target['hv']
     )
     assert target['rounding_gap'] == pytest.approx(
         abs(target['fractional_target_contracts'] - target['final_target_contracts'])
@@ -253,8 +253,8 @@ def test_sizing_diagnostics_expose_contract_hurdle_and_targets(monkeypatch):
     assert {
         'pre_scalar_notional_budget',
         'pre_scalar_dollar_vol_budget',
-        'uncapped_target_notional',
-        'target_notional',
+        'uncapped_fractional_target_notional',
+        'fractional_target_notional',
         'one_contract_notional',
         'one_contract_dollar_vol',
         'fractional_target_dollar_vol',
@@ -264,7 +264,8 @@ def test_sizing_diagnostics_expose_contract_hurdle_and_targets(monkeypatch):
     } <= target.keys()
     assert not {
         'budg_const', 'raw_not', 'targ_not', 'contract_notional',
-        'one_contract_risk', 'target_risk', 'allocated_dollar_vol_budget', 'contin_con', 'target_con',
+        'one_contract_risk', 'target_risk', 'allocated_dollar_vol_budget', 'uncapped_target_notional',
+        'target_notional', 'contin_con', 'target_con',
         'pos_risk',
     } & target.keys()
 

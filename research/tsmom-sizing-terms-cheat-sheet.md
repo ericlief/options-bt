@@ -35,11 +35,11 @@ Without other overlays or a binding clamp, the algebra is standard equal-vol
 sizing:
 
 ```text
-target_notional = (pre_scalar_dollar_vol_budget / vol_target)
-                  * direction * (vol_target / hv)
-                = direction * pre_scalar_dollar_vol_budget / hv
+fractional_target_notional = (pre_scalar_dollar_vol_budget / vol_target)
+                             * direction * (vol_target / hv)
+                           = direction * pre_scalar_dollar_vol_budget / hv
 
-abs(target_notional) * hv = pre_scalar_dollar_vol_budget
+abs(fractional_target_notional) * hv = pre_scalar_dollar_vol_budget
 ```
 
 IDM/ERC can intentionally give different `pre_scalar_dollar_vol_budget`
@@ -73,11 +73,12 @@ notional, and portfolio-risk limits.
 | `idm_risk_target` | IDM-adjusted total dollar-vol budget before ERC splitting | `portfolio_risk_target × idm_multiplier` | `$13,500 × 2.0386 ≈ $27,521` |
 | `pre_scalar_notional_budget` | MES's notional budget before applying the signal/volatility scalar | `(idm_risk_target × notional_allocation_weight) ÷ vol_target` | `($27,521 × 0.0684) ÷ 0.15 ≈ $12,548` |
 | `pre_scalar_dollar_vol_budget` | MES's dollar-vol budget before the signal/volatility scalar | `pre_scalar_notional_budget × vol_target` | `$12,548.06 × 0.15 ≈ $1,882` |
-| `uncapped_target_notional` | Uncapped desired dollar exposure after applying the final scalar | `pre_scalar_notional_budget × combined_scalar` | `$12,548.06 × 1.00 = $12,548` |
-| `target_notional` | Desired dollar exposure after any optional `max_notional` ceiling | `clamp(uncapped_target_notional, -max_notional, +max_notional)` | `$12,548` because no ceiling reduced it |
+| `uncapped_fractional_target_notional` | Uncapped continuous dollar exposure after applying the final scalar | `pre_scalar_notional_budget × combined_scalar` | `$12,548.06 × 1.00 = $12,548` |
+| `fractional_target_notional` | Continuous dollar exposure after any optional `max_notional` ceiling | `clamp(uncapped_fractional_target_notional, -max_notional, +max_notional)` | `$12,548` because no ceiling reduced it |
 
-Important: `uncapped_target_notional` and `target_notional` are desired
-portfolio exposure amounts.
+Important: `uncapped_fractional_target_notional` and
+`fractional_target_notional` are continuous desired portfolio exposure
+amounts.
 They are not the cash notional of one MES contract, and they are not
 unscaled values. They already incorporate the final signal and volatility
 scalar through `combined_scalar`.
@@ -88,8 +89,8 @@ scalar through `combined_scalar`.
 |---|---|---|---:|
 | `one_contract_notional` | Cash notional of one MES contract at the current price | `close × mult` | `$7,608.25 × 5 = $38,041.25` |
 | `one_contract_dollar_vol` | Standalone annualized dollar-vol risk of one MES contract | `one_contract_notional × hv` | `$38,041.25 × 0.1151 ≈ $4,379` |
-| `fractional_target_dollar_vol` | Dollar-vol risk of the fractional target before integer rounding | `abs(target_notional) × hv` | `$12,548.06 × 0.1151 ≈ $1,444` |
-| `fractional_target_contracts` | Fractional desired contract count | `target_notional ÷ one_contract_notional` | `$12,548.06 ÷ $38,041.25 = 0.3299` |
+| `fractional_target_dollar_vol` | Dollar-vol risk of the fractional target before integer rounding | `abs(fractional_target_notional) × hv` | `$12,548.06 × 0.1151 ≈ $1,444` |
+| `fractional_target_contracts` | Fractional desired contract count | `fractional_target_notional ÷ one_contract_notional` | `$12,548.06 ÷ $38,041.25 = 0.3299` |
 | `final_target_contracts` | Final whole-contract position target | `round(fractional_target_contracts)` in independent mode | `round(0.3299) = 0` |
 | `standalone_position_dollar_vol` | Standalone dollar-vol risk of the final integer position | `abs(final_target_contracts) × one_contract_dollar_vol` | `0 × $4,379 = $0` |
 | `portfolio_risk_contribution` | MES's correlation-aware Euler contribution to realized portfolio risk | Derived from signed exposure vector `x` and correlation matrix `H` | `$0` because MES has zero contracts |
@@ -131,8 +132,8 @@ maps historical reports to their replacements:
 | Historical name | Canonical name |
 |---|---|
 | `budg_const` | `pre_scalar_notional_budget` |
-| `raw_not` | `uncapped_target_notional` |
-| `targ_not` | `target_notional` |
+| `raw_not` | `uncapped_fractional_target_notional` |
+| `targ_not` | `fractional_target_notional` |
 | `contract_notional` | `one_contract_notional` |
 | `one_contract_risk` | `one_contract_dollar_vol` |
 | `target_risk` | `fractional_target_dollar_vol` |

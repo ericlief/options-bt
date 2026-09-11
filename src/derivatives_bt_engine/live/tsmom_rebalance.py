@@ -643,11 +643,11 @@ def _attach_sizing_diagnostics(targets: list[dict], *,
         if pre_scalar_notional_budget is not None and vol_target is not None:
             pre_scalar_dollar_vol_budget = abs(float(pre_scalar_notional_budget) * float(vol_target))
 
-        target_notional = target.get('target_notional')
+        fractional_target_notional = target.get('fractional_target_notional')
         fractional_target_dollar_vol = None
-        if target_notional is not None and hv is not None and not (
+        if fractional_target_notional is not None and hv is not None and not (
                 isinstance(hv, float) and math.isnan(hv)):
-            fractional_target_dollar_vol = abs(float(target_notional) * float(hv))
+            fractional_target_dollar_vol = abs(float(fractional_target_notional) * float(hv))
 
         fractional_target_contracts = target.get('fractional_target_contracts')
         final_target_contracts = target.get('final_target_contracts')
@@ -1310,7 +1310,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
          matrix built from the same config.data_source's own price
          history) -> a budget_constant PER ACTIVE SYMBOL instead of one
          shared figure.
-      3. Per instrument: combined_scalar -> target_notional (the
+      3. Per instrument: combined_scalar -> fractional_target_notional (the
          pre_scalar_notional_budget times combined_scalar, optionally capped
          by instr['max_notional'] as a hard ceiling) ->
          fractional_target_contracts -> final_target_contracts, clamped to
@@ -1346,7 +1346,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
     makes no IB calls anywhere, which is what makes this notebook-runnable
     for signal/regime inspection with no live account at all.
     current_contracts is always None in 'database' mode (no position
-    source without IB); final_target_contracts/target_notional/etc. are still
+    source without IB); final_target_contracts/fractional_target_notional/etc. are still
     computed and reported."""
     if config.data_source == 'ib' and ib is None:
         raise ValueError("config.data_source == 'ib' requires an IBPySync connection (pass ib=...) "
@@ -1606,7 +1606,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                     'sig_confid_reg': s['signal_confidence_regime'],
                     'sig_confid': s['signal_confidence'], 'vix_scalar': vix_scalar,
                     'close': s['close'], 'mult': multiplier,
-                    'uncapped_target_notional': None, 'target_notional': None,
+                    'uncapped_fractional_target_notional': None, 'fractional_target_notional': None,
                     'cluster': s['cluster'], 'dd_pct': s['dd_pct'],
                     'vx_current': vx_current, 'vx_ma': vx_ma, 'vx_ratio': vx_ratio, 'vol_regime': vol_regime,
                     'g_regime': s['g_regime'], 'g_fast': s['g_fast'], 'g_slow': s['g_slow'],
@@ -1634,15 +1634,18 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
             )
             combined_scalar *= vix_scalar
 
-            # uncapped_target_notional is budget_constant * combined_scalar
+            # uncapped_fractional_target_notional is budget_constant * combined_scalar
             # before the optional per-instrument max_notional ceiling clamp;
-            # target_notional is what actually drives final_target_contracts
+            # fractional_target_notional is what drives fractional_target_contracts
             # below. They only differ when max_notional_ceiling clips the
             # uncapped target.
-            uncapped_target_notional = budget_constant * combined_scalar
-            target_notional = uncapped_target_notional
+            uncapped_fractional_target_notional = budget_constant * combined_scalar
+            fractional_target_notional = uncapped_fractional_target_notional
             if max_notional_ceiling is not None:
-                target_notional = max(-max_notional_ceiling, min(max_notional_ceiling, target_notional))
+                fractional_target_notional = max(
+                    -max_notional_ceiling,
+                    min(max_notional_ceiling, fractional_target_notional),
+                )
 
             one_contract_notional = s['close'] * multiplier
             # fractional_target_contracts is the unrounded, unclamped value the
@@ -1654,8 +1657,12 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
             # way here for any caller that wants a pre-cluster-cap integer
             # (e.g. granularity-tracking instrumentation) -- apply_cluster_
             # risk_cap is what now does the real, single round+clamp.
-            fractional_target_contracts = target_notional / one_contract_notional if one_contract_notional else 0.0
-            final_target_contracts = round(target_notional / one_contract_notional) if one_contract_notional else 0
+            fractional_target_contracts = (
+                fractional_target_notional / one_contract_notional if one_contract_notional else 0.0
+            )
+            final_target_contracts = (
+                round(fractional_target_notional / one_contract_notional) if one_contract_notional else 0
+            )
             final_target_contracts = max(-max_contracts, min(max_contracts, final_target_contracts))
 
             # No IB connection in 'database' mode -- current_contracts is
@@ -1688,8 +1695,8 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                 'vix_scalar': vix_scalar,
                 'close': s['close'],
                 'mult': multiplier,
-                'uncapped_target_notional': uncapped_target_notional,
-                'target_notional': target_notional,
+                'uncapped_fractional_target_notional': uncapped_fractional_target_notional,
+                'fractional_target_notional': fractional_target_notional,
                 'cluster': s['cluster'],
                 'dd_pct': s['dd_pct'],
                 'vx_current': vx_current,
@@ -1862,10 +1869,12 @@ def print_rebalance_report(targets: list[dict]) -> str:
         trust discount, and portfolio-wide VX de-risking, respectively.
         None of these alone is "the" scalar; each is one ingredient.
       combined_scalar: EXACTLY the product
-        g_sig * risk_scalar * reg_discount * sig_confid (clamped to
-        [-1, 1]) * vix_scalar -- entirely reconstructable from the fields
-        already printed to its left, kept here as a convenience total
-        rather than making every reader do that multiplication by hand.
+        g_sig * risk_scalar * reg_discount * sig_confid * vix_scalar --
+        entirely reconstructable from the fields already printed to its
+        left, kept here as a convenience total rather than making every
+        reader do that multiplication by hand. `risk_scalar`'s explicit
+        [0.25, 2.0] bound is the volatility-leverage guardrail; the finished
+        product is intentionally not re-clamped to [-1, 1].
       ts / contin_sig: continuous_momentum's own ts_fast/ts_slow
         combination -- ts is the tanh-squashed weighted blend BEFORE the
         correction/rebound discount, contin_sig is that same blend AFTER
@@ -1922,7 +1931,7 @@ def print_rebalance_report(targets: list[dict]) -> str:
                if t.get('idm_multiplier') is not None else "")
             + f"  pre_scalar_dollar_vol_budget={_fmt(t.get('pre_scalar_dollar_vol_budget'), '.0f')}  "
               f"fractional_target_dollar_vol={_fmt(t.get('fractional_target_dollar_vol'), '.0f')}  "
-              f"target_notional={_fmt(t.get('target_notional'), '.0f')}  "
+              f"fractional_target_notional={_fmt(t.get('fractional_target_notional'), '.0f')}  "
               f"close={_fmt(t.get('close'), '.2f'):>9}  "
               f"one_contract_notional={_fmt(t.get('one_contract_notional'), '.0f')}  "
               f"one_contract_dollar_vol={_fmt(t.get('one_contract_dollar_vol'), '.0f')}  "

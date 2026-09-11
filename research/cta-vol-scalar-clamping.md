@@ -13,7 +13,7 @@ This system uses:
 ```
 vol_scalar = clamp(vol_target / realized_vol, 0.25, 2.0)
 scalar = trend_strength * vol_scalar * regime_discount
-target_notional = budget_constant * scalar
+fractional_target_notional = budget_constant * scalar
 budget_constant = (account_equity * target_portfolio_vol / sqrt(n_effective)) / vol_target
 ```
 
