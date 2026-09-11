@@ -440,7 +440,14 @@ def allocate_lot_aware_targets(
         cluster_limit = effective_cap_pct * float(total_risk_target)
 
     # The whole currently selected integer book: symbol -> signed contracts.
-    # It starts flat and is replaced wholesale by each selected candidate book.
+    # It MUST start flat. Do not seed it from targets' upstream
+    # final_target_contracts: that value is only the provisional independent
+    # round(fractional_target_contracts), and using it here would permanently
+    # discard every sub-half-contract signal before this allocator can decide
+    # whether one lot is a feasible cluster representative. Starting at zero
+    # lets a 0.43 MES target, for example, compete for a single feasible
+    # equity-cluster lot; the three phases below then build the final book.
+    # Each selected candidate replaces this entire book wholesale.
     allocated_contract_counts = {symbol: 0 for symbol in symbols}
 
     def portfolio_risk(contract_counts: dict[str, int]) -> float:
