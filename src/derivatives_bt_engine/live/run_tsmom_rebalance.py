@@ -56,11 +56,86 @@ log = logging.getLogger(__name__)
 
 DEFAULT_MAX_NOTIONAL = float(os.getenv('TSMOM_DEFAULT_MAX_NOTIONAL', '0')) or None
 
-# CSV-column relabeling only -- the underlying target dict keeps `signal`, but
-# the report uses `g_sig` to distinguish the selected direction signal from
-# continuous-momentum's separate `contin_sig` audit field. `combined_scalar`
-# is already the canonical target-dict name.
-_CSV_COLUMN_RENAME = {'signal': 'g_sig'}
+# CSV-column labels only -- target dictionaries deliberately keep descriptive
+# canonical names for code/API use, while the saved, wide rebalance CSV uses
+# compact names that remain specific about sizing stage and units. Keeping
+# this at the output boundary avoids reviving ambiguous internal names such as
+# `raw_not` or `budg_const`.
+_CSV_COLUMN_LABEL = {
+    'symbol': 'symbol',
+    'current_contracts': 'cur_con',
+    'final_target_contracts': 'tgt_con',
+    'fractional_target_contracts': 'frac_con',
+    'max_contracts': 'max_con',
+    'infeasible': 'infeas',
+    'active': 'active',
+    'cluster': 'cluster',
+    'close': 'close',
+    'mult': 'mult',
+    'daily_std': 'day_std',
+    'hv': 'hv',
+    'dd_pct': 'dd_pct',
+    'g_regime': 'g_regime',
+    'g_fast': 'g_fast',
+    'g_slow': 'g_slow',
+    'a_co': 'a_co',
+    'a_re': 'a_re',
+    'g_blend': 'g_blend',
+    'signal': 'g_sig',
+    'vol_regime': 'vol_reg',
+    'ts_fast': 'ts_fast',
+    'ts_slow': 'ts_slow',
+    'ts': 'ts',
+    'contin_sig': 'contin_sig',
+    'ts_regime': 'ts_reg',
+    'risk_scalar': 'risk_sc',
+    'reg_discount': 'reg_disc',
+    'sig_confid_reg': 'sig_conf_reg',
+    'sig_confid': 'sig_conf',
+    'vol_ratio': 'vol_ratio',
+    'vix_scalar': 'vx_sc',
+    'combined_scalar': 'comb_sc',
+    'idm_multiplier': 'idm_mult',
+    'account_equity': 'acct_eq',
+    'n_effective_clusters': 'n_eff',
+    'portfolio_risk_target': 'port_risk_tgt',
+    'idm_risk_target': 'idm_risk_tgt',
+    'realized_portfolio_risk': 'real_port_risk',
+    'discrete_allocation': 'disc_alloc',
+    'discrete_risk_overrun_pct': 'disc_over_pct',
+    'integer_risk_limit': 'int_risk_lim',
+    'integer_zero_reason': 'int_zero_why',
+    'cluster_dollar_vol_budget': 'clust_dvol_bud',
+    'vol_target': 'vol_tgt',
+    'target_portfolio_vol': 'port_vol_tgt',
+    'pre_scalar_notional_budget': 'pre_sc_not_bud',
+    'notional_allocation_weight': 'not_alloc_w',
+    'allocated_dollar_vol_budget': 'alloc_dvol_bud',
+    'fractional_target_dollar_vol': 'frac_tgt_dvol',
+    'standalone_position_dollar_vol': 'pos_dvol',
+    'portfolio_risk_contribution': 'port_risk_con',
+    'uncapped_target_notional': 'uncapped_tgt_not',
+    'target_notional': 'tgt_not',
+    'one_contract_notional': 'one_con_not',
+    'one_contract_dollar_vol': 'one_con_dvol',
+    'rounding_gap': 'rnd_gap',
+    'scalar_capped': 'risk_sc_bound',
+    'zero_reason': 'zero_why',
+    'max_cluster_risk_pct': 'max_clust_risk_pct',
+    'max_lot_overrun_pct': 'max_lot_over_pct',
+    'risk_budget_mode': 'risk_budg_mode',
+    'notional_weighting': 'not_weighting',
+    'use_idm': 'use_idm',
+    'vx_current': 'vx_cur',
+    'vx_ma': 'vx_ma',
+    'vx_ratio': 'vx_ratio',
+    'error': 'error',
+}
+
+
+def _csv_label(key: str) -> str:
+    """Compact CSV label for a descriptive target-dictionary field name."""
+    return _CSV_COLUMN_LABEL.get(key, key)
 
 
 def configure_logging():
@@ -194,12 +269,13 @@ def _save_report(cluster_report: str, targets: list[dict], mixing_diagnostics: O
                 'rounding_gap', 'scalar_capped', 'zero_reason',
                 'max_cluster_risk_pct', 'max_lot_overrun_pct']
     rounded_rows = [
-        {_CSV_COLUMN_RENAME.get(k, k): (round(v, 4) if isinstance(v, float) and not math.isnan(v) else v)
+        {_csv_label(k): (round(v, 4) if isinstance(v, float) and not math.isnan(v) else v)
          for k, v in t.items()}
         for t in targets
     ]
     all_keys = {key for row in rounded_rows for key in row}
-    fieldnames = [k for k in priority if k in all_keys] + sorted(all_keys - set(priority))
+    compact_priority = [_csv_label(key) for key in priority]
+    fieldnames = [key for key in compact_priority if key in all_keys] + sorted(all_keys - set(compact_priority))
     csv_path = os.path.join(results_dir, f'tsmom_live_rebalance_{ts}.csv')
     with open(csv_path, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
