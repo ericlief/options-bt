@@ -1,7 +1,10 @@
 # TSMOM Sizing Terms Cheat Sheet
 
-This cheat sheet explains the live TSMOM sizing fields using the actual MES
-row from the $90,000 Goulding/IDM/ERC report generated on 2026-09-10.
+This cheat sheet explains the live TSMOM sizing fields using the historical
+MES row from the $90,000 Goulding/IDM/ERC report generated on 2026-09-10,
+plus the `$1,842` post-fix live example discussed below. The historical table
+values remain useful for tracing the original rounding issue; current values
+change with prices, volatility, and the corrected sizing function.
 
 The central distinction is:
 
@@ -31,15 +34,36 @@ full-strength Goulding signal.  For example, the historical MES row below
 had `risk_scalar=1.3035` but was limited to `combined_scalar=1.0`; the
 corrected function permits `combined_scalar=1.3035`.
 
-Without other overlays or a binding clamp, the algebra is standard equal-vol
-sizing:
+The report computes the two dollar-vol fields by different direct formulas:
 
 ```text
-fractional_target_notional = (pre_scalar_dollar_vol_budget / vol_target)
-                             * direction * (vol_target / hv)
-                           = direction * pre_scalar_dollar_vol_budget / hv
+pre_scalar_dollar_vol_budget = abs(pre_scalar_notional_budget × vol_target)
 
-abs(fractional_target_notional) * hv = pre_scalar_dollar_vol_budget
+fractional_target_dollar_vol = abs(fractional_target_notional × hv)
+```
+
+That is why a `$12.5K` `frac_tgt_not` value is not `$12.5K` of risk: it is
+cash notional. With the run's annualized `hv` of roughly `14.74%`, for example:
+
+```text
+$12,500 fractional target notional × 14.74% hv ≈ $1,842 fractional target dollar-vol
+```
+
+The two dollar-vol figures are related, but they are not aliases:
+
+```text
+fractional_target_dollar_vol / pre_scalar_dollar_vol_budget
+= abs(combined_scalar) × hv / vol_target
+```
+
+They match only in the pure full-strength vol-parity case, where the combined
+scalar is exactly `vol_target / hv` (and no VIX, confidence, regime, or hard
+notional overlay changes it):
+
+```text
+fractional_target_notional = direction × pre_scalar_dollar_vol_budget / hv
+
+abs(fractional_target_notional) × hv = pre_scalar_dollar_vol_budget
 ```
 
 IDM/ERC can intentionally give different `pre_scalar_dollar_vol_budget`
@@ -89,7 +113,7 @@ scalar through `combined_scalar`.
 |---|---|---|---:|
 | `one_contract_notional` | Cash notional of one MES contract at the current price | `close × mult` | `$7,608.25 × 5 = $38,041.25` |
 | `one_contract_dollar_vol` | Standalone annualized dollar-vol risk of one MES contract | `one_contract_notional × hv` | `$38,041.25 × 0.1151 ≈ $4,379` |
-| `fractional_target_dollar_vol` | Dollar-vol risk of the continuous target before integer rounding | `abs(fractional_target_notional) × hv` | Equals `pre_scalar_dollar_vol_budget` when no other overlay/cap binds: `$1,842` in the current post-fix run. The original pre-fix snapshot's `$1,444` is retained only as a comparison. |
+| `fractional_target_dollar_vol` | Dollar-vol risk of the continuous target before integer rounding | `abs(fractional_target_notional) × hv` | `$1,842` when the continuous target notional is about `$12.5K` and `hv` is about `14.74%`. It equals `pre_scalar_dollar_vol_budget` only under pure full-strength vol parity. The original pre-fix snapshot's `$1,444` is retained only as a comparison. |
 | `fractional_target_contracts` | Fractional desired contract count | `fractional_target_notional ÷ one_contract_notional` | `$12,548.06 ÷ $38,041.25 = 0.3299` |
 | `final_target_contracts` | Final whole-contract position target | `round(fractional_target_contracts)` in independent mode | `round(0.3299) = 0` |
 | `standalone_position_dollar_vol` | Standalone dollar-vol risk of the final integer position | `abs(final_target_contracts) × one_contract_dollar_vol` | `0 × $4,379 = $0` |
@@ -107,10 +131,9 @@ final target      = 0 contracts
 ```
 
 The one-contract risk hurdle is approximately `$4,379`, while the continuous
-target's dollar-vol is only its assigned pre-scalar dollar-vol budget (for
-example, `$1,842` in the current post-fix run). The legacy independent
-allocator cannot trade a sub-half-contract target, so it rounds to zero and
-reports `zero_reason=below_half_contract`.
+target's dollar-vol is only `$1,842` in the current example. The legacy
+independent allocator cannot trade a sub-half-contract target, so it rounds to
+zero and reports `zero_reason=below_half_contract`.
 
 This is separate from the account-level portfolio target of `$13,500`. The
 portfolio target is a risk budget for the whole book; it does not mean every
