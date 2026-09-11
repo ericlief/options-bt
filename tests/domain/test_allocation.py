@@ -725,7 +725,7 @@ def _target(symbol, cluster, continuous_contracts, close=100.0, multiplier=10.0,
     }
 
 
-def test_lot_aware_allocator_prefers_feasible_cluster_representative():
+def test_lot_aware_allocator_prefers_feasible_cluster_representative(caplog):
     # A's one-lot risk fits the account target while B's does not.  Both
     # belong to the same cluster, so the allocator should represent the
     # cluster with A rather than independently rounding either signal.
@@ -733,17 +733,21 @@ def test_lot_aware_allocator_prefers_feasible_cluster_representative():
         _target('A', 'equity', 0.33, close=100, multiplier=200, hv=0.20),  # one-lot risk = 4,000
         _target('B', 'equity', -0.16, close=100, multiplier=500, hv=0.20),  # one-lot risk = 10,000
     ]
-    out = allocate_lot_aware_targets(
-        targets,
-        portfolio_risk_target=5_000,
-        H=np.eye(2),
-        active_symbols=['A', 'B'],
-    )
+    with caplog.at_level('INFO', logger='derivatives_bt_engine.domain.allocation'):
+        out = allocate_lot_aware_targets(
+            targets,
+            portfolio_risk_target=5_000,
+            H=np.eye(2),
+            active_symbols=['A', 'B'],
+        )
 
     assert out[0]['final_target_contracts'] == 1
     assert out[1]['final_target_contracts'] == 0
     assert out[1]['integer_zero_reason'] == 'integer_risk_limit'
     assert out[0]['standalone_position_dollar_vol'] == pytest.approx(4_000)
+    assert any('Lot-aware allocation:' in record.message for record in caplog.records)
+    assert any('Lot-aware representative: A=+1' in record.message for record in caplog.records)
+    assert any('Lot-aware final: contracts=[A=+1]' in record.message for record in caplog.records)
 
 
 def test_lot_aware_allocator_preserves_direction_and_hard_limit():

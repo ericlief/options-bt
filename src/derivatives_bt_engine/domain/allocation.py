@@ -412,10 +412,12 @@ def allocate_lot_aware_targets(
     # the rebalance fail at the final integer-allocation step.
     risk_symbols = list(active_symbols or [])
     corr = None
+    used_measured_correlation = False
     if H is not None and risk_symbols:
         candidate = np.asarray(H, dtype=float)
         if candidate.ndim == 2 and candidate.shape == (len(risk_symbols), len(risk_symbols)):
             corr = candidate
+            used_measured_correlation = True
     if corr is None:
         risk_symbols = symbols
         corr = np.eye(len(risk_symbols), dtype=float)
@@ -475,6 +477,24 @@ def allocate_lot_aware_targets(
         candidate[symbol] += direction[symbol]
         return candidate
 
+    def format_contracts(contract_counts: dict[str, int]) -> str:
+        return ', '.join(
+            f'{symbol}={count:+d}'
+            for symbol, count in sorted(contract_counts.items())
+            if count
+        ) or 'flat'
+
+    log.info(
+        'Lot-aware allocation: target=$%.0f limit=%s overrun=%.0f%% correlation=%s '
+        'cluster_cap=%s eligible=%s',
+        portfolio_risk_target or 0.0,
+        f'${portfolio_limit:,.0f}' if portfolio_limit is not None else 'unbounded',
+        risk_overrun_pct * 100,
+        'measured' if used_measured_correlation else 'identity fallback',
+        f'${cluster_limit:,.0f}' if cluster_limit is not None else 'off',
+        ', '.join(symbols) or 'none',
+    )
+
     # First ensure that each live cluster has a representative where the
     # account-level risk and cluster cap permit one.  The least-risk contract
     # wins, making the choice deterministic for a given target table.
@@ -492,7 +512,15 @@ def allocate_lot_aware_targets(
                 ))
         if not candidates:
             break
-        _, _, _, q = min(candidates, key=lambda item: (item[0], item[1], item[2]))
+        realized_risk, one_lot_risk, symbol, q = min(
+            candidates, key=lambda item: (item[0], item[1], item[2])
+        )
+        log.info(
+            'Lot-aware representative: %s=%+d cluster=%s fractional=%+.3f '
+            'one_lot_dvol=$%.0f portfolio_dvol=$%.0f',
+            symbol, q[symbol], clusters[symbol],
+            direction[symbol] * continuous_contracts[symbol], one_lot_risk, realized_risk,
+        )
 
     # Fit the continuous target without crossing the first integer above it.
     # This makes .33 contracts become zero and 1.17 contracts become one, but
@@ -513,7 +541,15 @@ def allocate_lot_aware_targets(
                 candidates.append((new_distance, portfolio_risk(candidate), symbol, candidate))
         if not candidates:
             break
-        _, _, _, q = min(candidates, key=lambda item: (item[0], item[1], item[2]))
+        new_distance, realized_risk, symbol, q = min(
+            candidates, key=lambda item: (item[0], item[1], item[2])
+        )
+        log.debug(
+            'Lot-aware continuous fit: %s=%+d fractional=%+.3f distance=$%.0f '
+            'portfolio_dvol=$%.0f',
+            symbol, q[symbol], direction[symbol] * continuous_contracts[symbol],
+            new_distance, realized_risk,
+        )
 
     # Spend unused portfolio capacity only when it moves realized risk closer
     # to the requested target.  One extra lot beyond the continuous target is
@@ -540,7 +576,15 @@ def allocate_lot_aware_targets(
                     candidates.append((new_gap, distance_from_continuous(candidate), symbol, candidate))
             if not candidates:
                 break
-            _, _, _, q = min(candidates, key=lambda item: (item[0], item[1], item[2]))
+            new_gap, new_distance, symbol, q = min(
+                candidates, key=lambda item: (item[0], item[1], item[2])
+            )
+            log.debug(
+            'Lot-aware utilization: %s=%+d fractional=%+.3f target_gap=$%.0f '
+            'continuous_gap=$%.0f portfolio_dvol=$%.0f',
+                symbol, q[symbol], direction[symbol] * continuous_contracts[symbol],
+                new_gap, new_distance, portfolio_risk(q),
+            )
 
     # Finalize every valid row, including zeroed rows, from the same integer
     # map.  The reason is only set when a single lot itself is infeasible; a
@@ -561,6 +605,13 @@ def allocate_lot_aware_targets(
                     risk > cluster_limit + 1e-9
                     for risk in cluster_risks(one_lot).values()):
                 target['integer_zero_reason'] = 'cluster_risk_limit'
+
+    log.info(
+        'Lot-aware final: contracts=[%s] realized_portfolio_dvol=$%.0f '
+        'target=$%.0f limit=%s',
+        format_contracts(q), portfolio_risk(q), portfolio_risk_target or 0.0,
+        f'${portfolio_limit:,.0f}' if portfolio_limit is not None else 'unbounded',
+    )
 
     return targets
 
