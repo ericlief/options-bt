@@ -495,6 +495,10 @@ def allocate_lot_aware_targets(
         ', '.join(symbols) or 'none',
     )
 
+    representative_iterations = 0
+    continuous_fit_iterations = 0
+    utilization_iterations = 0
+
     # First ensure that each live cluster has a representative where the
     # account-level risk and cluster cap permit one.  The least-risk contract
     # wins, making the choice deterministic for a given target table.
@@ -518,14 +522,16 @@ def allocate_lot_aware_targets(
         # choose the cheaper one-lot risk; if still tied, use symbol solely as
         # a stable deterministic tie-breaker. It never ranks symbols by any
         # economic meaning.
+        prior_risk = portfolio_risk(q)
         realized_risk, one_lot_risk, symbol, q = min(
             candidates, key=lambda item: (item[0], item[1], item[2])
         )
+        representative_iterations += 1
         log.info(
-            'Lot-aware representative: %s=%+d cluster=%s fractional=%+.3f '
-            'one_lot_dvol=$%.0f portfolio_dvol=$%.0f',
-            symbol, q[symbol], clusters[symbol],
-            direction[symbol] * continuous_contracts[symbol], one_lot_risk, realized_risk,
+            'Lot-aware representative #%d/%d candidates: %s=%+d cluster=%s '
+            'fractional=%+.3f one_lot_dvol=$%.0f portfolio_dvol=$%.0f -> $%.0f',
+            representative_iterations, len(candidates), symbol, q[symbol], clusters[symbol],
+            direction[symbol] * continuous_contracts[symbol], one_lot_risk, prior_risk, realized_risk,
         )
 
     # Fit the continuous target without crossing the first integer above it.
@@ -534,6 +540,7 @@ def allocate_lot_aware_targets(
     # target actually calls for two.
     while True:
         current_distance = distance_from_continuous(q)
+        current_risk = portfolio_risk(q)
         candidates = []
         for symbol in symbols:
             desired_ceiling = min(max_contracts[symbol], math.ceil(continuous_contracts[symbol]))
@@ -546,15 +553,23 @@ def allocate_lot_aware_targets(
             if new_distance < current_distance - 1e-9:
                 candidates.append((new_distance, portfolio_risk(candidate), symbol, candidate))
         if not candidates:
+            log.debug(
+                'Lot-aware continuous fit complete after %d iterations: contracts=[%s] '
+                'distance=$%.0f portfolio_dvol=$%.0f',
+                continuous_fit_iterations, format_contracts(q), current_distance, current_risk,
+            )
             break
+        prior_contracts = format_contracts(q)
         new_distance, realized_risk, symbol, q = min(
             candidates, key=lambda item: (item[0], item[1], item[2])
         )
+        continuous_fit_iterations += 1
         log.debug(
-            'Lot-aware continuous fit: %s=%+d fractional=%+.3f distance=$%.0f '
-            'portfolio_dvol=$%.0f',
+            'Lot-aware continuous fit #%d/%d candidates: contracts=[%s] -> %s=%+d '
+            'fractional=%+.3f distance=$%.0f -> $%.0f portfolio_dvol=$%.0f -> $%.0f',
+            continuous_fit_iterations, len(candidates), prior_contracts,
             symbol, q[symbol], direction[symbol] * continuous_contracts[symbol],
-            new_distance, realized_risk,
+            current_distance, new_distance, current_risk, realized_risk,
         )
 
     # Spend unused portfolio capacity only when it moves realized risk closer
@@ -566,6 +581,7 @@ def allocate_lot_aware_targets(
         while True:
             current_risk = portfolio_risk(q)
             current_gap = abs(float(portfolio_risk_target) - current_risk)
+            current_distance = distance_from_continuous(q)
             candidates = []
             for symbol in symbols:
                 desired_ceiling = min(
@@ -581,15 +597,26 @@ def allocate_lot_aware_targets(
                 if new_gap < current_gap - 1e-9:
                     candidates.append((new_gap, distance_from_continuous(candidate), symbol, candidate))
             if not candidates:
+                log.debug(
+                    'Lot-aware utilization complete after %d iterations: contracts=[%s] '
+                    'target_gap=$%.0f continuous_gap=$%.0f portfolio_dvol=$%.0f',
+                    utilization_iterations, format_contracts(q), current_gap,
+                    current_distance, current_risk,
+                )
                 break
+            prior_contracts = format_contracts(q)
             new_gap, new_distance, symbol, q = min(
                 candidates, key=lambda item: (item[0], item[1], item[2])
             )
+            utilization_iterations += 1
             log.debug(
-            'Lot-aware utilization: %s=%+d fractional=%+.3f target_gap=$%.0f '
-            'continuous_gap=$%.0f portfolio_dvol=$%.0f',
+                'Lot-aware utilization #%d/%d candidates: contracts=[%s] -> %s=%+d '
+                'fractional=%+.3f target_gap=$%.0f -> $%.0f continuous_gap=$%.0f -> $%.0f '
+                'portfolio_dvol=$%.0f -> $%.0f',
+                utilization_iterations, len(candidates), prior_contracts,
                 symbol, q[symbol], direction[symbol] * continuous_contracts[symbol],
-                new_gap, new_distance, portfolio_risk(q),
+                current_gap, new_gap, current_distance, new_distance,
+                current_risk, portfolio_risk(q),
             )
 
     # Finalize every valid row, including zeroed rows, from the same integer
@@ -614,9 +641,10 @@ def allocate_lot_aware_targets(
 
     log.info(
         'Lot-aware final: contracts=[%s] realized_portfolio_dvol=$%.0f '
-        'target=$%.0f limit=%s',
+        'target=$%.0f limit=%s iterations=(representatives=%d, fit=%d, utilization=%d)',
         format_contracts(q), portfolio_risk(q), portfolio_risk_target or 0.0,
         f'${portfolio_limit:,.0f}' if portfolio_limit is not None else 'unbounded',
+        representative_iterations, continuous_fit_iterations, utilization_iterations,
     )
 
     return targets

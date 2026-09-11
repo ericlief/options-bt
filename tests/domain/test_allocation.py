@@ -746,7 +746,8 @@ def test_lot_aware_allocator_prefers_feasible_cluster_representative(caplog):
     assert out[1]['integer_zero_reason'] == 'integer_risk_limit'
     assert out[0]['standalone_position_dollar_vol'] == pytest.approx(4_000)
     assert any('Lot-aware allocation:' in record.message for record in caplog.records)
-    assert any('Lot-aware representative: A=+1' in record.message for record in caplog.records)
+    assert any('Lot-aware representative #1/1 candidates: A=+1' in record.message
+               for record in caplog.records)
     assert any('Lot-aware final: contracts=[A=+1]' in record.message for record in caplog.records)
 
 
