@@ -109,6 +109,10 @@ _CSV_COLUMN_LABEL = {
     'discrete_allocation': 'disc_alloc',
     'discrete_risk_overrun_pct': 'disc_over_pct',
     'min_fractional_contracts': 'min_frac_con',
+    'max_active_per_cluster': 'max_act_clust',
+    'cluster_universe_rank': 'clust_rank',
+    'cluster_universe_score': 'clust_score',
+    'cluster_universe_excluded': 'clust_excl',
     'integer_risk_limit': 'int_risk_lim',
     'integer_zero_reason': 'int_zero_why',
     'cluster_dollar_vol_budget': 'clust_dvol_bud',
@@ -262,7 +266,8 @@ def _save_report(cluster_report: str, targets: list[dict], mixing_diagnostics: O
                 'account_equity', 'n_effective_clusters',
                 'portfolio_risk_target', 'idm_risk_target', 'realized_portfolio_risk',
                 'discrete_allocation', 'discrete_risk_overrun_pct', 'min_fractional_contracts',
-                'integer_risk_limit',
+                'integer_risk_limit', 'max_active_per_cluster', 'cluster_universe_rank',
+                'cluster_universe_score', 'cluster_universe_excluded',
                 'integer_zero_reason',
                 'cluster_dollar_vol_budget', 'vol_target', 'target_portfolio_vol',
                 'pre_scalar_notional_budget', 'notional_allocation_weight',
@@ -425,6 +430,10 @@ def parse_args():
                         "target is scaled by the same idm_multiplier used to size positions, so it "
                         "stays a consistency backstop rather than reversing that credit. Cannot be "
                         "combined with standard --discrete-allocation lot-aware")
+    p.add_argument('--max-active-per-cluster', type=int, default=None,
+                   help="Only used with --apply-cluster-cap: retain at most this many active "
+                        "symbols per cluster before IDM/ERC and sizing (default: no limit). "
+                        "Ranks by abs(combined_scalar), the cap's normal conviction priority")
     p.add_argument('--discrete-allocation', choices=DISCRETE_ALLOCATIONS, default='lot-aware',
                    help="Whole-contract sizing policy (default: %(default)s). 'independent' keeps "
                         "the existing per-symbol rounding. 'lot-aware' rounds all targets at the "
@@ -527,6 +536,7 @@ def main():
         notional_weighting=args.notional_weighting,
         use_idm=args.use_idm,
         apply_cluster_cap=args.apply_cluster_cap,
+        max_active_per_cluster=args.max_active_per_cluster,
         discrete_allocation=args.discrete_allocation,
         discrete_risk_overrun_pct=args.discrete_risk_overrun_pct,
         min_fractional_contracts=args.min_fractional_contracts,

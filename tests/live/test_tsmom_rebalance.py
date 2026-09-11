@@ -185,6 +185,51 @@ def test_tsmom_live_config_rejects_cluster_cap_with_standard_lot_aware():
         TsmomLiveConfig(discrete_allocation='lot-aware', apply_cluster_cap=True)
 
 
+@pytest.mark.parametrize('max_active_per_cluster,apply_cluster_cap', [
+    (0, True),
+    (2, False),
+])
+def test_tsmom_live_config_validates_cluster_cap_universe_limit(
+        max_active_per_cluster, apply_cluster_cap):
+    with pytest.raises(ValueError):
+        TsmomLiveConfig(
+            discrete_allocation='independent',
+            apply_cluster_cap=apply_cluster_cap,
+            max_active_per_cluster=max_active_per_cluster,
+        )
+
+
+def test_cluster_cap_universe_keeps_top_n_by_normal_combined_scalar_priority():
+    config = TsmomLiveConfig(
+        discrete_allocation='independent', apply_cluster_cap=True, max_active_per_cluster=2,
+    )
+    # Same realized vol/regime means score order is signal-strength order;
+    # B/C share a cluster, while D demonstrates that the limit is per cluster.
+    signals = {
+        symbol: {
+            'cluster': cluster,
+            'signal_for_scalar': strength,
+            'daily_std': 0.01,
+            'regime': tr.TrendRegime.BULL,
+            'regime_discount': 0.5,
+            'signal_confidence': 1.0,
+            'annualization_days': 252,
+        }
+        for symbol, cluster, strength in [
+            ('A', 'grain', 0.90), ('B', 'grain', -0.70), ('C', 'grain', 0.40),
+            ('D', 'metal', 0.10),
+        ]
+    }
+
+    selected, ranks, scores = tr._select_cluster_cap_universe(
+        signals, ['A', 'B', 'C', 'D'], config, vix_scalar=1.0,
+    )
+
+    assert selected == {'A', 'B', 'D'}
+    assert ranks == {'A': 1, 'B': 2, 'C': 3, 'D': 1}
+    assert scores['A'] > scores['B'] > scores['C']
+
+
 @pytest.mark.parametrize('value', [0.0, -0.25, 0.51])
 def test_tsmom_live_config_rejects_bad_min_fractional_contracts(value):
     with pytest.raises(ValueError):

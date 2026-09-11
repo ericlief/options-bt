@@ -261,6 +261,26 @@ risk capacity. It is useful for researching diversification-first small
 accounts, but it can promote a sub-half-contract signal and is not the
 standard lot-aware behavior.
 
+### Optional top-N cluster-cap universe
+
+When deliberately using the hand-assigned cluster-cap policy, an ex-ante
+universe restriction can now be applied before IDM/ERC, risk budgets, and
+integer sizing:
+
+```text
+--apply-cluster-cap
+--discrete-allocation independent
+--max-active-per-cluster 2
+```
+
+This is selection rather than a post-sizing haircut: it retains at most two
+active instruments from each cluster, then recomputes the correlation matrix
+and allocation on those survivors. The ranking is the cap's normal conviction
+priority, `abs(combined_scalar)`, reconstructed before budgeting from the
+signal, own-vol risk scalar, regime discount, confidence, and VIX scalar.
+The symbol is only a deterministic tie-breaker. It is intentionally separate
+from standard lot-aware, which has no cluster policy.
+
 The account risk limit is hard by default and can be relaxed explicitly with
 `--discrete-risk-overrun-pct`. A symbol that has a live signal but cannot fit
 one lot after risk repair is retained at zero with

@@ -242,6 +242,11 @@ class TsmomLiveConfig:
     # (e.g. against a stale/broken correlation estimate) rather than
     # silently re-imposing the assumption idm mode exists to replace.
     apply_cluster_cap: bool = False
+    # Optional ex-ante universe limit used with apply_cluster_cap. Before
+    # budgeting, retain at most this many active signals per cluster, ranked
+    # by the same abs(combined_scalar) priority the cap uses for walk-down.
+    # None preserves the full active universe.
+    max_active_per_cluster: Optional[int] = None
     # Whole-contract conversion policy. 'independent' preserves the existing
     # per-symbol rounding behavior. 'lot-aware' rounds the complete target
     # book then uses correlation-aware risk repair only if required; it has no
@@ -332,6 +337,10 @@ class TsmomLiveConfig:
             raise ValueError("discrete_risk_overrun_pct must be non-negative")
         if not 0 < self.min_fractional_contracts <= 0.5:
             raise ValueError("min_fractional_contracts must be in (0, 0.5]")
+        if self.max_active_per_cluster is not None and self.max_active_per_cluster < 1:
+            raise ValueError("max_active_per_cluster must be positive when set")
+        if self.max_active_per_cluster is not None and not self.apply_cluster_cap:
+            raise ValueError("max_active_per_cluster requires apply_cluster_cap")
         if self.discrete_allocation == 'lot-aware' and self.apply_cluster_cap:
             raise ValueError("apply_cluster_cap is incompatible with lot-aware; use "
                              "flat-cluster-diversified for the experimental cluster policy")
@@ -389,6 +398,49 @@ def build_instruments(symbols: list[str], max_notional: Optional[float] = None,
             'max_notional': max_notional,
         })
     return instruments
+
+
+def _select_cluster_cap_universe(signals: Mapping[str, dict], active_symbols: list[str],
+                                 config: TsmomLiveConfig, vix_scalar: float) -> tuple[set[str], dict[str, int], dict[str, float]]:
+    """Keep the top active signals per cluster using normal cluster-cap priority.
+
+    This runs before the IDM matrix, ERC/HRP weights, and risk budgets exist.
+    Reconstructing ``combined_scalar`` here is exact: it needs only the
+    finalized instrument signal, realized vol, regime discount, confidence,
+    and common VIX scalar--not the later notional budget. The cluster-cap
+    walk-down therefore sees the same ``abs(combined_scalar)`` ranking.
+    """
+    if config.max_active_per_cluster is None:
+        return set(active_symbols), {}, {}
+
+    by_cluster: dict[str, list[str]] = {}
+    score_by_symbol: dict[str, float] = {}
+    for symbol in active_symbols:
+        signal = signals[symbol]
+        score_by_symbol[symbol] = abs(compute_position_scalar(
+            signal['signal_for_scalar'], signal['daily_std'], config.vol_target, signal['regime'],
+            regime_discount=signal['regime_discount'], signal_confidence=signal['signal_confidence'],
+            annualization_days=signal['annualization_days'],
+        ) * vix_scalar)
+        by_cluster.setdefault(signal['cluster'], []).append(symbol)
+
+    selected: set[str] = set()
+    rank_by_symbol: dict[str, int] = {}
+    for cluster, members in sorted(by_cluster.items()):
+        # Symbol is only a deterministic tie-breaker. The score is the cap's
+        # established priority rather than a second economic signal metric.
+        ranked = sorted(members, key=lambda symbol: (-score_by_symbol[symbol], symbol))
+        for rank, symbol in enumerate(ranked, start=1):
+            rank_by_symbol[symbol] = rank
+            if rank <= config.max_active_per_cluster:
+                selected.add(symbol)
+        log.info(
+            'Cluster-cap universe: cluster=%s max_active=%d ranked=[%s] selected=[%s]',
+            cluster, config.max_active_per_cluster,
+            ', '.join(f'{symbol} score={score_by_symbol[symbol]:.4f}' for symbol in ranked),
+            ', '.join(ranked[:config.max_active_per_cluster]) or 'none',
+        )
+    return selected, rank_by_symbol, score_by_symbol
 
 
 # ------------------------------------------------------------------
@@ -677,6 +729,8 @@ def _attach_sizing_diagnostics(targets: list[dict], *,
         elif final_target_contracts == 0:
             if target.get('vol_regime') in (VolRegime.SPIKE, VolRegime.EXTREME):
                 zero_reason = 'vol_regime_hold'
+            elif target.get('cluster_universe_excluded'):
+                zero_reason = 'cluster_universe_limit'
             elif target.get('active') is False:
                 zero_reason = 'inactive_signal'
             elif fractional_target_contracts is None:
@@ -1482,6 +1536,15 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
         v = sig['signal_for_scalar']
         return v is not None and not (isinstance(v, float) and math.isnan(v)) and abs(v) > config.min_conviction
 
+    # Cluster-cap universe selection is intentionally before both budget
+    # modes. The selected symbols are the actual candidate set for cluster
+    # counting, H/IDM/ERC, and later integer sizing; excluded symbols remain
+    # in the report with an explicit inactive diagnostic but receive no risk.
+    initial_active_symbols = [symbol for symbol, signal in signals.items() if _is_active(signal)]
+    selected_active_symbols, cluster_universe_rank, cluster_universe_score = (
+        _select_cluster_cap_universe(signals, initial_active_symbols, config, vix_scalar)
+    )
+
     # Stage 2: derive the risk budget, per config.risk_budget_mode.
     n_effective = None
     desired_risk_budget = None
@@ -1515,7 +1578,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
     H: Optional[np.ndarray] = None
     covered: Optional[np.ndarray] = None
     if config.risk_budget_mode == 'cluster':
-        active_clusters = {s['cluster'] for s in signals.values() if _is_active(s)}
+        active_clusters = {signals[symbol]['cluster'] for symbol in selected_active_symbols}
         n_effective = compute_n_effective(active_clusters)
         account_equity = config.account_equity
         if account_equity:
@@ -1530,7 +1593,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                  f'{desired_risk_budget:.0f}' if desired_risk_budget is not None else 'N/A (no account_equity)',
                  f'{shared_budget_constant:.0f}' if shared_budget_constant is not None else 'N/A')
     else:  # 'idm'
-        active_symbols = [s for s, sig in signals.items() if _is_active(sig)]
+        active_symbols = [symbol for symbol in initial_active_symbols if symbol in selected_active_symbols]
         n_effective = compute_n_effective({signals[s]['cluster'] for s in active_symbols})
         account_equity = config.account_equity
         if account_equity and active_symbols:
@@ -1590,7 +1653,7 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
             continue
 
         s = signals[symbol]
-        active = _is_active(s)
+        active = symbol in selected_active_symbols
         try:
             multiplier = s['multiplier']
             max_contracts = instr.get('max_contracts', config.max_contracts)
@@ -1652,6 +1715,11 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                 annualization_days=s['annualization_days'],
             )
             combined_scalar *= vix_scalar
+            if config.max_active_per_cluster is not None and not active:
+                # The selector is a universe decision, not a haircut. Keep
+                # the row and its raw diagnostics, but do not let an excluded
+                # instrument consume the shared cluster-mode budget.
+                combined_scalar = 0.0
 
             # uncapped_fractional_target_notional is budget_constant * combined_scalar
             # before the optional per-instrument max_notional ceiling clamp;
@@ -1755,6 +1823,20 @@ def compute_rebalance_targets(instruments: list[dict], config: TsmomLiveConfig,
                 'vol_regime': vol_regime,
                 'error': str(exc),
             })
+
+    for target in targets:
+        symbol = target.get('symbol')
+        was_active_before_universe_filter = symbol in initial_active_symbols
+        target.update({
+            'max_active_per_cluster': config.max_active_per_cluster,
+            'cluster_universe_rank': cluster_universe_rank.get(symbol),
+            'cluster_universe_score': cluster_universe_score.get(symbol),
+            'cluster_universe_excluded': (
+                config.max_active_per_cluster is not None
+                and was_active_before_universe_filter
+                and symbol not in selected_active_symbols
+            ),
+        })
 
     portfolio_risk_target = (
         config.account_equity * config.target_portfolio_vol
